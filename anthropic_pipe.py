@@ -1,8 +1,9 @@
 """
 title: Anthropic API Integration
 author: Podden (https://github.com/Podden/)
+github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.3.8
+version: 0.3.9
 license: MIT
 requirements: pydantic>=2.0.0, aiohttp>=3.8.0
 environment_variables:

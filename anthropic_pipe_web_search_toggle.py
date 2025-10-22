@@ -1,6 +1,7 @@
 """
 title: Anthropic Web Search Toggle
 author: Podden (https://github.com/Podden/)
+github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 id: anthropic_pipe_web_search_toggle_filter
 description: Enforce web search for the next Claude message.  Use in combination with my Anthropic Pipe: https://openwebui.com/f/podden/anthropic_pipe
 version: 0.1
