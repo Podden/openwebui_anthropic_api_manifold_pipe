@@ -26,19 +26,10 @@ class Filter:
     async def inlet(
         self,
         body: dict,
-        __event_emitter__: Callable[[dict[str, Any]], Awaitable[None]],
         __metadata__: Optional[dict] = None,
     ) -> dict:
         if self.toggle and __metadata__ is not None:
             __metadata__["web_search_enforced"] = True
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": "Web Search will be enforced for the next message.",
-                    "done": True,
-                    "hidden": False,
-                },
-            })
         return body
 
     async def outlet(
