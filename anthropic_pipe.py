@@ -264,6 +264,14 @@ class Pipe:
             "supports_memory": True,
             "supports_vision": True,
         },
+        "claude-opus-4-5-20251101": {
+            "max_tokens": 64000,
+            "context_length": 200000,
+            "supports_thinking": True,
+            "supports_1m_context": False,
+            "supports_memory": True,
+            "supports_vision": True,
+        },
         "claude-sonnet-4-5-20250929": {
             "max_tokens": 64000,
             "context_length": 200000,
@@ -293,6 +301,7 @@ class Pipe:
         "claude-sonnet-4": "claude-sonnet-4-20250514",
         "claude-opus-4": "claude-opus-4-20250514",
         "claude-opus-4-1": "claude-opus-4-1-20250805",
+        "claude-opus-4-5": "claude-opus-4-5-20251101",
         "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
         "claude-haiku-4-5": "claude-haiku-4-5-20251001",
     }
