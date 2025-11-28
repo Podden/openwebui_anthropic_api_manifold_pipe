@@ -3,9 +3,9 @@ title: Anthropic API Integration
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.5.3
+version: 0.5.5
 license: MIT
-requirements: pydantic>=2.0.0, aiohttp>=3.8.0
+requirements: pydantic>=2.0.0, anthropic>=0.75.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -28,6 +28,10 @@ Supports:
 
 
 Changelog:
+v0.5.5
+- Fixed effort parameter support by upgrading Anthropic SDK from 0.60.0 to 0.75.0
+- Re-enabled effort levels for Opus 4.5
+
 v0.5.4
 - Fixed Message Caching Problems when using RAG or Memories
 
@@ -348,9 +352,9 @@ class Pipe:
         "claude-sonnet-4": "claude-sonnet-4-20250514",
         "claude-opus-4": "claude-opus-4-20250514",
         "claude-opus-4-1": "claude-opus-4-1-20250805",
-        "claude-opus-4-5": "claude-opus-4-5-20251101",
         "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
         "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        "claude-opus-4-5": "claude-opus-4-5-20251101",
 
     }
 
@@ -405,7 +409,7 @@ class Pipe:
             description="Maximum number of retries for failed requests (due to rate limiting, transient errors or connection issues)",
         )
         CACHE_CONTROL: Literal["cache disabled", "cache tools array only", "cache tools array and system prompt", "cache tools array, system prompt and messages"] = Field(
-            default="cache tools array, system prompt and messages",
+            default="cache disabled",
             description="Cache control scope for prompts",
         )
         WEB_SEARCH_USER_CITY: str = Field(
@@ -628,13 +632,15 @@ class Pipe:
         
         # Handle effort parameter (maps from OpenWebUI's reasoning_effort or user valves)
         # Priority: reasoning_effort param > user valve
+        # Note: output_config is a beta feature and must be passed via extra_body
+        effort_config = None
         if model_info["supports_effort"]:
             effort_level = __user__["valves"].EFFORT
             if body.get("reasoning_effort") in ["low", "medium", "high"]:
                 effective_effort = body.get("reasoning_effort")
             else:
                 effective_effort = effort_level
-            payload["output_config"] = {"effort": effective_effort}
+            effort_config = {"effort": effective_effort}
 
         raw_messages = body.get("messages", []) or []
         system_messages = []
@@ -811,12 +817,15 @@ class Pipe:
         if self.valves.ENABLE_1M_CONTEXT and model_info["supports_1m_context"]:
             beta_headers.append("context-1m-2025-08-07")
 
-        # Add effort beta header if effort is configured
-        if model_info["supports_effort"]:
+        # Add effort beta header and output_config if effort is configured
+        if model_info["supports_effort"] and effort_config:
             beta_headers.append("effort-2025-11-24")
+            payload["output_config"] = effort_config
 
         if beta_headers and len(beta_headers) > 0:
             headers["anthropic-beta"] = ",".join(beta_headers)
+            # Add betas list to payload for beta.messages.stream
+            payload["betas"] = beta_headers
 
         logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
         logger.debug(f"Headers: {headers}")
@@ -1097,7 +1106,7 @@ class Pipe:
                         logger.debug("Restoring missing cache_control marker")
                         cached_block["cache_control"] = {"type": "ephemeral"}
 
-                    async with client.messages.stream(**payload_for_stream) as stream:
+                    async with client.beta.messages.stream(**payload_for_stream) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
                             # Only log event_type and minimal event info, skip snapshot fields
