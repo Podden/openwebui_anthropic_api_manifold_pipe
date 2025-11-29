@@ -2,17 +2,11 @@
 
 > **Advanced Anthropic Claude integration with multi-tool orchestration, prompt caching, and extended thinking capabilities**
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![Anthropic](https://img.shields.io/badge/Anthropic-Claude-orange.svg)](https://www.anthropic.com/)
-[![Open WebUI](https://img.shields.io/badge/Open%20WebUI-Compatible-brightgreen.svg)](https://openwebui.com/)
-[![Version](https://img.shields.io/badge/Version-0.5.4-blue.svg)](https://github.com/Podden/openwebui_anthropic_api_manifold_pipe)
-
 ---
 
 ## 📖 Overview
 
-An advanced Anthropic API integration for Open WebUI that enables Claude models to orchestrate complex multi-tool workflows. Handle sophisticated tasks like: *"Grab my Jira Issues, Research something, create a Confluence Summary for Next Meeting and send it to me via Slack!"* – all in a single request with parallel tool calling and iterative refinement.
+An advanced Anthropic API integration for Open WebUI that enables Claude models to orchestrate complex multi-tool workflows. Handle sophisticated tasks like: *"Grab my Jira Issues for this week and send me a summary on slack!"* – all in a single request with parallel and sequential tool calling.
 
 ### 🎯 Key Highlights
 
@@ -20,10 +14,10 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 |---------|-------------|
 | 🔄 **Multi-Tool Loop** | Call multiple tools iteratively in the same response |
 | ⚡ **Parallel Execution** | Execute independent tools simultaneously for performance |
-| 💾 **Prompt Caching** | Automatic caching for system prompts, tools, and messages |
-| 🧠 **Extended Thinking** | Toggle Claude's reasoning process visibility |
-| 👁️ **Vision Support** | Process images with automatic preprocessing |
-| 💻 **Code Execution** | Sandboxed Python execution via Anthropic's tool |
+| 💾 **Prompt Caching** | Automatic caching for system prompts, tools, and messages, compatible with openwebui RAG and Memory System |
+| 🧠 **Extended Thinking** | Toggle Claude's reasoning on and off mir-conversation |
+| 👁️ **Vision Support** | Process images with Claude |
+| 💻 **Code Execution** | Sandboxed Python execution via Anthropic tool |
 | 🔍 **Web Search** | Built-in search with inline citations |
 | 📊 **1M Token Context** | Extended context for Claude Sonnet 4 and 4.5 |
 
@@ -35,7 +29,7 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 
 | Feature | Description |
 |---------|-------------|
-| **Anthropic Python SDK** | Official SDK integration for reliability |
+| **Anthropic Python SDK** | Uses the official SDK integration for reliability |
 | **Model Auto-Discovery** | Automatically fetches available Claude models from API |
 | **Tool Call Loop** | Execute multiple tools in a single response cycle |
 | **Streaming Responses** | Real-time output streaming with status updates |
@@ -48,7 +42,6 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 | Feature | Description |
 |---------|-------------|
 | **Image Processing/Vision** | Process and analyze images (JPEG, PNG, GIF, WebP) |
-| **PDF Processing** | Base64 inline processing for PDF documents |
 | **Extended Thinking** | Controllable via valve and toggle filter |
 | **Effort Levels** | Configurable effort (`low`, `medium`, `high`) for Opus 4.5 |
 | **Web Search Tool** | With inline citations `[1]` and source references |
@@ -58,25 +51,9 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 | **1M Token Context** | Extended context for Sonnet 4 and 4.5 (Tier 4 required) |
 | **Token Usage Display** | Context window progress bar in status |
 | **Citations** | For web search and document/RAG sources |
-| **OpenWebUI Compatibility** | Native function calling, Channels, Notes support |
-| **Security Guards** | Duplicate tool name validation, private tool blocking |
+| **OpenWebUI Compatibility** | Channel and Notes support |
+| **Security Guards** | Duplicate tool name validation, private method blocking |
 
-### Supported Models
-
-| Model | Max Tokens | Context | Thinking | 1M Context | Effort |
-|-------|------------|---------|----------|------------|--------|
-| Claude 3 Opus | 4,096 | 200K | ❌ | ❌ | ❌ |
-| Claude 3 Sonnet | 4,096 | 200K | ❌ | ❌ | ❌ |
-| Claude 3 Haiku | 4,096 | 200K | ❌ | ❌ | ❌ |
-| Claude 3.5 Sonnet | 8,192 | 200K | ❌ | ❌ | ❌ |
-| Claude 3.5 Haiku | 8,192 | 200K | ❌ | ❌ | ❌ |
-| Claude 3.7 Sonnet | 64,000 | 200K | ✅ | ❌ | ❌ |
-| Claude Sonnet 4 | 64,000 | 200K | ✅ | ✅ | ❌ |
-| Claude Opus 4 | 32,000 | 200K | ✅ | ❌ | ❌ |
-| Claude Opus 4.1 | 32,000 | 200K | ✅ | ❌ | ❌ |
-| **Claude Sonnet 4.5** | 64,000 | 200K | ✅ | ✅ | ❌ |
-| **Claude Haiku 4.5** | 64,000 | 200K | ✅ | ❌ | ❌ |
-| **Claude Opus 4.5** | 64,000 | 200K | ✅ | ❌ | ✅ |
 
 ---
 
@@ -84,13 +61,12 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 
 | Status | Feature | Notes |
 |--------|---------|-------|
-| ✅ | **PDF Processing** | Base64 inline in messages (not Files API) |
-| ✅ | **Citations** | Web search and document citations |
-| ✅ | **Memory & RAG Integration** | With intelligent cache-preserving extraction |
-| 📌 | **Files API** integration | For native file handling |
+| 📌 | **PDF Processing** | Base64 inline in messages instead of RAG extraction
+| 📌 | **Files API** integration | For native file handling with Code Execution |
 | 📌 | **UserValves API Key** support | Per-user API keys |
-| 📌 | **MCP Connector** | Pending evaluation of mcpo |
-| 📌 | **Claude Skills** | Implement Usage of Claude Skills |
+| 📌 | **Claude Skills** | Implement Usage of Skills |
+| 📌 | **Programmatic Tool calling** | Toggle for Programmatic Tool calling |
+| 📌 | **Context editing** | Auto Cleanup for long conversations |
 | 📌 | **Claude Memory** | Evaluate if the Claude Memory System can be hooked into Openwebui Memory |
 
 ---
@@ -123,9 +99,8 @@ Install directly from the Open WebUI community:
 2. **Configure Models** (Admin Settings → Models):
    - Activate the Thinking, Web Search, and Code Execution Filters for each Claude model
    - Set **Function Calling** to `Native` in Advanced Parameters
-   - Deactivate OpenWebUI's built-in WebSearch and Code Interpreter (optional)
-
-3. **Start chatting** with Claude models using advanced tool orchestration!
+   - Optional: Deactivate OpenWebUI's built-in WebSearch and Code Interpreter
+3. **Start chatting** with Claude models!
 
 ---
 
