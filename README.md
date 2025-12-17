@@ -53,6 +53,8 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 | **Citations** | For web search and document/RAG sources |
 | **OpenWebUI Compatibility** | Channel and Notes support |
 | **Security Guards** | Duplicate tool name validation, private method blocking |
+| **Tool Search** | Use Tool Search Tool to save tokens with big tool descriptions |
+| **Context Editing** | Remove old Tool Results and Thinking Blocks from history to cleanup context window |
 
 
 ---
@@ -66,7 +68,6 @@ An advanced Anthropic API integration for Open WebUI that enables Claude models 
 | 📌 | **UserValves API Key** support | Per-user API keys |
 | 📌 | **Claude Skills** | Implement Usage of Skills |
 | 📌 | **Programmatic Tool calling** | Toggle for Programmatic Tool calling |
-| 📌 | **Context editing** | Auto Cleanup for long conversations |
 | 📌 | **Claude Memory** | Evaluate if the Claude Memory System can be hooked into Openwebui Memory |
 
 ---
