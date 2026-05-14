@@ -772,8 +772,18 @@ class Pipe:
         if model_name in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[model_name]
 
-        # Return conservative defaults for unknown models
-        return {
+        # Strip date suffix (e.g. claude-opus-4-6-20251022 → claude-opus-4-6) and retry
+        normalized = re.sub(r"-\d{8}$", "", model_name)
+        if normalized != model_name and normalized in cls._api_capabilities_cache:
+            return cls._api_capabilities_cache[normalized]
+
+        # Apply MODEL_CAPABILITY_OVERRIDES for manually-specified models not from API
+        overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name, {})
+        if not overrides:
+            overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(normalized, {})
+
+        # Return conservative defaults for unknown models, with any overrides applied
+        defaults = {
             "max_tokens": 4096,
             "context_length": 200000,
             "supports_thinking": True,
@@ -788,12 +798,18 @@ class Pipe:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
         }
+        defaults.update(overrides)
+        return defaults
 
     class Valves(BaseModel):
         ANTHROPIC_API_KEY: str = "Your API Key Here"
         ANTHROPIC_BASE_URL: str = Field(
             default="",
-            description="Custom base URL for the Anthropic API (e.g. for a proxy). Leave empty to use the default Anthropic endpoint (https://api.anthropic.com).",
+            description="Custom base URL for the Anthropic API (e.g. for Azure: https://<resource>.cognitiveservices.azure.com/anthropic). Leave empty to use the default Anthropic endpoint.",
+        )
+        ENABLED_MODELS: str = Field(
+            default="",
+            description="Comma-separated list of model names to enable (e.g. 'claude-opus-4-6,claude-sonnet-4-5'). Required for endpoints that don't support /v1/models (like Azure). Leave empty for auto-discovery.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -1074,7 +1090,18 @@ class Pipe:
         Fetches the current list of Anthropic models using the official Anthropic Python SDK.
         Parses capabilities from the API response and caches them.
         Returns OpenWebUI model dicts.
+
+        If ENABLED_MODELS valve is set, skips API discovery and returns those models
+        directly. Required for endpoints that don't support /v1/models (e.g. Azure).
         """
+        if self.valves.ENABLED_MODELS.strip():
+            enabled_list = [m.strip() for m in self.valves.ENABLED_MODELS.split(",") if m.strip()]
+            models = []
+            for name in enabled_list:
+                info = self.get_model_info(name)
+                models.append(self._build_openwebui_model_entry(name, info))
+            return models
+
         # Return cached result if still fresh
         if (
             self._api_capabilities_cache
