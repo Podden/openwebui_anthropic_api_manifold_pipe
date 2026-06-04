@@ -106,7 +106,8 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `ANTHROPIC_API_KEY` | required | Anthropic API key used by the pipe unless overridden by a per-user key |
-| `ANTHROPIC_BASE_URL` | `""` | Optional custom base URL / proxy for Anthropic API requests |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom base URL / proxy for Anthropic API requests. For Claude Platform on AWS, set to `https://aws-external-anthropic.<region>.api.aws` |
+| `ANTHROPIC_WORKSPACE_ID` | `""` | Claude Platform on AWS workspace ID. When set, sent as the `anthropic-workspace-id` header on every request. Required when `ANTHROPIC_BASE_URL` points at an `aws-external-anthropic` endpoint |
 | `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` research-preview speed tier on models this pipe marks as fast-mode capable |
 | `ENABLE_INTERLEAVED_THINKING` | `true` | Allows thinking blocks between tool calls where supported |
 | `WEB_SEARCH` | `true` | Enables Anthropic native web search |
@@ -132,6 +133,17 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `cache tools array only` | Cache tool definitions only |
 | `cache tools array and system prompt` | Cache tools + system prompt |
 | `cache tools array, system prompt and messages` | Cache tools + system + growing message history |
+
+#### Using Claude on AWS (Claude Platform on AWS)
+
+This pipe can target [Claude Platform on AWS](https://docs.aws.amazon.com/claude-platform/latest/userguide/making-requests.html#_using_the_base_anthropic_client)
+via the base Anthropic client (no `boto3`/SigV4 dependency). Set three things in the Global Valves:
+
+- `ANTHROPIC_API_KEY` — your Anthropic API key
+- `ANTHROPIC_BASE_URL` — `https://aws-external-anthropic.<region>.api.aws` (e.g. `https://aws-external-anthropic.us-west-2.api.aws`)
+- `ANTHROPIC_WORKSPACE_ID` — your workspace ID (sent as the required `anthropic-workspace-id` header)
+
+If the AWS endpoint does not expose `/v1/models`, the pipe falls back to a built-in model list so the picker stays populated.
 
 ### UserValves (per-user)
 
@@ -212,6 +224,11 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 ---
 
 ## 📝 Recent pipe changes
+
+### `v0.9.15`
+- Added support for **Claude Platform on AWS** via the base Anthropic client (`ANTHROPIC_BASE_URL` + new `ANTHROPIC_WORKSPACE_ID` valve)
+- Centralized Anthropic client creation and added a static model-list fallback for endpoints without `/v1/models`
+- @Willian-Zhang
 
 ### `v0.9.11`
 - Added async handling for Open Terminal `run_command` ↔ Anthropic `bash` tool bridging

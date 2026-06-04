@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.14
+version: 0.9.15
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.103.0
 environment_variables:
@@ -37,6 +37,15 @@ Supports:
 - Programmatic Tool Calling (tools callable from code execution)
 
 Changelog:
+v0.9.15
+- Added support for Claude Platform on AWS via the base Anthropic client: set
+  ANTHROPIC_BASE_URL to https://aws-external-anthropic.<region>.api.aws and the new
+  ANTHROPIC_WORKSPACE_ID valve (sent as the anthropic-workspace-id header)
+- Centralized Anthropic client creation in _build_anthropic_client
+- Added a static model-list fallback so the model picker is populated when the
+  endpoint does not expose /v1/models (e.g. AWS)
+- (Author: Willian Zhang (proudly with Claude))
+
 v0.9.14
 - Added Claude Opus 4.8
 - Promt caching bugfixes when using native PDF Upload and Images
@@ -788,7 +797,7 @@ async def create_request_payload(
     if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
-        
+
     # Handle "Effort" parameter (maps from OpenWebUI's reasoning_effort or user valves)
     # Effort works differently based on model capabilities
     effort_config = None
@@ -1067,6 +1076,11 @@ async def create_request_payload(
         "anthropic-version": pipe.API_VERSION,
         "content-type": "application/json",
     }
+
+    # AWS Claude Platform requires identifying the target workspace via header.
+    ws_id = pipe.valves.ANTHROPIC_WORKSPACE_ID.strip()
+    if ws_id:
+        headers["anthropic-workspace-id"] = ws_id
 
     beta_headers: list[str] = []
 
@@ -2636,7 +2650,13 @@ class Pipe:
         ANTHROPIC_API_KEY: str = "Your API Key Here"
         ANTHROPIC_BASE_URL: str = Field(
             default="https://api.anthropic.com",
-            description="Custom base URL for the Anthropic API",
+            description="Custom base URL for the Anthropic API. For Claude Platform on AWS, set to https://aws-external-anthropic.<region>.api.aws",
+        )
+        ANTHROPIC_WORKSPACE_ID: str = Field(
+            default="",
+            description="AWS Claude Platform workspace ID. When set, sent as the "
+            "'anthropic-workspace-id' header on every request. Required when "
+            "ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
@@ -2915,6 +2935,35 @@ class Pipe:
         # `diagnostics.previous_message_id` on the next turn so the API can
         # report where the prompt-cache prefix diverged.
         self._cache_diagnostics_state: Dict[str, str] = {}
+
+    def _build_anthropic_client(
+        self,
+        api_key: str,
+        default_headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ) -> "AsyncAnthropic":
+        """Construct an AsyncAnthropic client, applying ANTHROPIC_BASE_URL and the
+        AWS Claude Platform 'anthropic-workspace-id' header when configured.
+
+        Centralizes client creation so the base_url + workspace-id logic lives in
+        one place. When ANTHROPIC_WORKSPACE_ID is empty the header is omitted and
+        first-party Anthropic behavior is unchanged.
+        """
+        from anthropic import AsyncAnthropic
+
+        base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
+        headers = dict(default_headers or {})
+        ws_id = self.valves.ANTHROPIC_WORKSPACE_ID.strip()
+        if ws_id:
+            headers.setdefault("anthropic-workspace-id", ws_id)
+        kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if headers:
+            kwargs["default_headers"] = headers
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return AsyncAnthropic(**kwargs)
 
     # COMPILED PIPE METHOD GROUPS INSERTION POINT
     # BEGIN GENERATED SECTION: anthropic_pipe.pipe_method_groups
@@ -4643,12 +4692,10 @@ class Pipe:
     ) -> str:
         """Download file from Anthropic Files API, save to OpenWebUI, return markdown link."""
         try:
-            from anthropic import AsyncAnthropic
             import hashlib
             import uuid
 
-            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+            client = self._build_anthropic_client(api_key)
 
             # Get file metadata first
             file_meta = await client.beta.files.retrieve_metadata(file_id=file_id)
@@ -4754,9 +4801,7 @@ class Pipe:
 
         client = None
         try:
-            from anthropic import AsyncAnthropic
-            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-            client = AsyncAnthropic(api_key=self.valves.ANTHROPIC_API_KEY, **({"base_url": base_url} if base_url else {}))
+            client = self._build_anthropic_client(self.valves.ANTHROPIC_API_KEY)
         except ImportError:
             logger.warning("Anthropic SDK not available for file upload")
             return blocks_by_user_msg, processed_filenames
@@ -4917,10 +4962,7 @@ class Pipe:
             await emit_status("🔧 Validating Skills...", hidden=True)
 
             try:
-                from anthropic import AsyncAnthropic
-
-                base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-                client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+                client = self._build_anthropic_client(api_key)
 
                 # Fetch all available skills
                 available_skills = {}
@@ -5866,14 +5908,11 @@ class Pipe:
                 models.append(self._build_openwebui_model_entry(name, info))
             return models
 
-        from anthropic import AsyncAnthropic
-
         models = []
         new_cache: Dict[str, dict] = {}
         try:
             api_key = self.valves.ANTHROPIC_API_KEY
-            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+            client = self._build_anthropic_client(api_key)
             async for m in client.models.list():
                 name = m.id
                 display_name = getattr(m, "display_name", name)
@@ -5886,11 +5925,16 @@ class Pipe:
                 entry = self._build_openwebui_model_entry(name, info, display_name)
                 models.append(entry)
 
-            # Update class-level cache
-            Pipe._api_capabilities_cache = new_cache
-            Pipe._api_capabilities_cache_ts = time.time()
-            logger.info(f"Cached capabilities for {len(new_cache)} models from API")
-            return models
+            if models:
+                # Update class-level cache
+                Pipe._api_capabilities_cache = new_cache
+                Pipe._api_capabilities_cache_ts = time.time()
+                logger.info(f"Cached capabilities for {len(new_cache)} models from API")
+                return models
+            # Endpoint returned no models (e.g. AWS Claude Platform may not expose
+            # /v1/models) — fall through to the static fallback below.
+            logger.info("Model listing returned no models; using static fallback")
+            return self._static_fallback_models()
         except Exception as e:
             logging.warning(
                 f"Could not fetch models from SDK/API: {e}"
@@ -5901,8 +5945,22 @@ class Pipe:
                 for name, info in self._api_capabilities_cache.items():
                     models.append(self._build_openwebui_model_entry(name, info))
                 return models
-            # No cache available — return empty (API key likely invalid)
-            return models
+            # No cache available (e.g. AWS endpoint without /v1/models, or invalid
+            # key) — synthesize a usable list from known model capabilities.
+            return self._static_fallback_models()
+
+    def _static_fallback_models(self) -> List[dict]:
+        """Build OpenWebUI model entries from MODEL_CAPABILITY_OVERRIDES.
+
+        Used when the live model listing is unavailable (notably Claude Platform
+        on AWS, whose endpoint may not expose /v1/models) so the model picker is
+        still populated.
+        """
+        models = []
+        for name in self.MODEL_CAPABILITY_OVERRIDES:
+            info = self.get_model_info(name)
+            models.append(self._build_openwebui_model_entry(name, info))
+        return models
 
     @staticmethod
     def _build_openwebui_model_entry(
@@ -5969,8 +6027,7 @@ class Pipe:
             # Make synchronous request to Anthropic API
             # For task requests, we don't have __user__ context, so use default key
             api_key = self.valves.ANTHROPIC_API_KEY
-            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-            client = AsyncAnthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
+            client = self._build_anthropic_client(api_key)
 
             response = await client.messages.create(**task_payload)
 
@@ -6517,14 +6574,14 @@ class Pipe:
         tool_calls_info: list = None,
     ) -> str:
         """Format a code execution block with output as a collapsible <details> block.
-        
+
         Args:
             tool_calls_info: List of dicts with {name, input, result, is_error} for programmatic tool calls
         """
         # Build summary with tool call count
         tool_count = len(tool_calls_info) if tool_calls_info else 0
         summary_suffix = f" — {tool_count} tool call{'s' if tool_count != 1 else ''}" if tool_count else ""
-        
+
         parts = []
         parts.append(f"\n<details>\n<summary>💻 Code Execution ({language}){summary_suffix}</summary>\n")
         if code:
@@ -6770,8 +6827,7 @@ class Pipe:
                 api_key = user_api_key.strip()
                 logger.debug("Using user-provided API key from UserValves")
             request_timeout = self.valves.REQUEST_TIMEOUT
-            base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-            client = AsyncAnthropic(api_key=api_key, default_headers=headers, timeout=request_timeout, **({"base_url": base_url} if base_url else {}))
+            client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
                 __user__["valves"].SHOW_TOKEN_COUNT != "Off"
@@ -8100,7 +8156,7 @@ class Pipe:
             )
 
         await status.complete(final_status)
-        
+
         # Emit chat:completion done event so frontend knows streaming finished
         # (triggers TTS finish, usage display, etc.)
         done_data: dict = {"choices": [{"finish_reason": "stop", "delta": {"content": ""}}], "done": True}
