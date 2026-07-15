@@ -7383,7 +7383,10 @@ class Pipe:
                 api_key = user_api_key.strip()
                 logger.debug("Using user-provided API key from UserValves")
             request_timeout = self.valves.REQUEST_TIMEOUT
-            client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
+            # Strip x-api-key from default_headers: the SDK sets it internally from
+            # the api_key param; duplicating it causes 401 with SDK >= 0.100.
+            sdk_headers = {k: v for k, v in headers.items() if k.lower() != "x-api-key"}
+            client = self._build_anthropic_client(api_key, default_headers=sdk_headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
                 __user__["valves"].SHOW_TOKEN_COUNT != "Off"
