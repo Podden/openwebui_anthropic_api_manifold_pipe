@@ -818,7 +818,11 @@ async def create_request_payload(
     # Heuristic: models that support adaptive thinking (Opus 4.6, Sonnet 4.6,
     # Opus 4.7, Opus 4.8) do not accept these fields when adaptive is enabled.
     # On Opus 4.7 / 4.8 they are rejected unconditionally. Safe to skip for the set.
-    _strip_sampling = bool(model_info.get("supports_adaptive_thinking"))
+    _strip_sampling = (
+        bool(model_info.get("supports_adaptive_thinking")) or
+        actual_model_name in {"claude-opus-4-7", "claude-opus-4-8"} or
+        actual_model_name.startswith("claude-fable-"),
+    )
     if not _strip_sampling and body.get("temperature") is not None:
         payload["temperature"] = float(body.get("temperature", 0))
     if not _strip_sampling and body.get("top_k") is not None:
