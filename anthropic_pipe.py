@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.19
+version: 0.9.20
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.103.0
 environment_variables:
@@ -37,6 +37,9 @@ Supports:
 - Programmatic Tool Calling (tools callable from code execution)
 
 Changelog:
+v0.9.20
+- Fixed a "API key is invalid" error when using ANTHROPIC KEY Valve
+
 v0.9.19
 - Removed static ANTHROPIC_BUILTIN_TOOL_NAMES in favor of default TOOL_SEARCH_EXCLUDE_TOOLS including all openwebui internal tools
 - Fixed open-terminal tool calls and read_file bugs, experimental bash and text_editor tool support seems to work now, needs further testing
@@ -6497,7 +6500,14 @@ class Pipe:
         from anthropic import AsyncAnthropic
 
         base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-        headers = dict(default_headers or {})
+        # The SDK derives its own "X-Api-Key" from api_key and merges default_headers
+        # with a case-sensitive dict merge, so a lowercase "x-api-key" here survives
+        # alongside it and httpx emits the header twice -> 401 "API key is invalid.".
+        headers = {
+            k: v
+            for k, v in (default_headers or {}).items()
+            if k.lower() != "x-api-key"
+        }
         ws_id = (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip()
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
