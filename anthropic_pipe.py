@@ -4661,6 +4661,34 @@ class Pipe:
                     all_matches.append((m.start(), "compaction", m))
 
                 if all_matches:
+                    # Pre-scan: build a map of standalone server_tool_result blocks
+                    # keyed by tool_use_id so each result can be emitted
+                    # IMMEDIATELY after its matching server_tool_use block —
+                    # even when text blocks or other tool_use blocks appear
+                    # between them in the stored HTML string.
+                    #
+                    # Without this fix, interleaved tool_use/tool_result blocks
+                    # (produced when the model calls multiple server tools in
+                    # rapid succession) are reconstructed in document order,
+                    # causing Anthropic API 400 errors on follow-up requests:
+                    # "tool use found without a corresponding tool_result block".
+                    _standalone_results: dict[str, dict] = {}
+                    for _, _kind, _m in all_matches:
+                        if _kind != "server_tool_result":
+                            continue
+                        _attrs_str = _m.group(1)
+                        _attrs = dict(PATTERN_DATA_ATTR.findall(_attrs_str))
+                        _pb64 = _attrs.get("payload-b64", "")
+                        _dec = (
+                            self._decode_block_payload(_pb64) if _pb64 else None
+                        )
+                        if isinstance(_dec, dict) and _dec.get(
+                            "type", ""
+                        ).endswith("_tool_result"):
+                            _tuid = _dec.get("tool_use_id", "")
+                            if _tuid:
+                                _standalone_results[_tuid] = _dec
+                    _consumed_results: set[str] = set()
                     all_matches.sort(key=lambda t: t[0])
                     blocks: list[dict] = []
                     last_end = 0
@@ -4697,17 +4725,52 @@ class Pipe:
                                 # emit it right after so the API sees the
                                 # full tool_use + tool_result pair at the
                                 # original position.
-                                # data-result-kind carries the block type (e.g. "web_search_tool_result")
-                                # and data-result-payload-b64 carries the encoded payload. The decoded
-                                # payload already has "type": "...", so result_kind is just sanity-check.
                                 result_b64 = attrs.get("result-payload-b64", "")
                                 if result_b64:
-                                    result_decoded = self._decode_block_payload(result_b64)
-                                    if (
-                                        isinstance(result_decoded, dict)
-                                        and result_decoded.get("type", "").endswith("_tool_result")
+                                    result_decoded = self._decode_block_payload(
+                                        result_b64
+                                    )
+                                    if isinstance(
+                                        result_decoded, dict
+                                    ) and result_decoded.get("type", "").endswith(
+                                        "_tool_result"
                                     ):
                                         blocks.append(result_decoded)
+                                        # Mark consumed so the standalone
+                                        # server_tool_result carrier is skipped
+                                        _tuid_emb = result_decoded.get(
+                                            "tool_use_id", ""
+                                        )
+                                        if _tuid_emb:
+                                            _consumed_results.add(_tuid_emb)
+                                else:
+                                    # No embedded result — look up the pre-scanned
+                                    # standalone result map and emit immediately
+                                    # to guarantee Anthropic-required adjacency:
+                                    # server_tool_use must be directly followed by
+                                    # its *_tool_result with nothing in between.
+                                    _tuid = decoded.get("id", "")
+                                    if _tuid and _tuid in _standalone_results:
+                                        blocks.append(_standalone_results[_tuid])
+                                        _consumed_results.add(_tuid)
+                                    elif _tuid:
+                                        logger.warning(
+                                            "server_tool_use id=%s has no matching "
+                                            "standalone result in pre-scan map — the "
+                                            "server_tool_result carrier may be missing "
+                                            "or PATTERN_SERVER_TOOL_RESULT_BLOCK failed "
+                                            "to match it. This tool_use will be emitted "
+                                            "without a result, which will cause a 400 on "
+                                            "the next follow-up request.",
+                                            _tuid,
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "server_tool_use block has no 'id' field — "
+                                            "cannot look up standalone result in pre-scan "
+                                            "map. Block payload: %r",
+                                            decoded,
+                                        )
                             # else: legacy/missing payload → drop
                         elif kind == "server_tool_result":
                             attrs_str = match.group(1)
@@ -4715,7 +4778,11 @@ class Pipe:
                             payload_b64 = attrs.get("payload-b64", "")
                             decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
                             if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
-                                blocks.append(decoded)
+                                # Skip results already emitted immediately
+                                # after their server_tool_use block.
+                                _tuid = decoded.get("tool_use_id", "")
+                                if not _tuid or _tuid not in _consumed_results:
+                                    blocks.append(decoded)
                             # else: legacy/missing payload → drop
                         elif kind == "compaction":
                             blocks.append({
