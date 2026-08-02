@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.20
+version: 0.9.21
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.103.0
 environment_variables:
@@ -33,10 +33,25 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode (research preview) for Opus 4.7 / 4.8
+- Fast Mode (research preview) for Opus 4.8 / 5
 - Programmatic Tool Calling (tools callable from code execution)
 
 Changelog:
+v0.9.21
+- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, adaptive thinking on by
+  default, full effort ladder through max, 512-token prompt-cache minimum, Fast Mode
+- Thinking is now explicitly disabled (`thinking: {"type": "disabled"}`) when the user's
+  Thinking toggle is off on models that run adaptive thinking by default (Sonnet 5, Opus 5).
+  Previously the pipe just omitted the `thinking` field, which on these models still ran
+  adaptive thinking regardless of the toggle. Opus 5 additionally rejects `disabled` above
+  `high` effort, so at `xhigh`/`max` the field is left unset instead (runs adaptive).
+- Fixed web_search tool_choice enforcement to check whether thinking is actually active
+  instead of just checking for the presence of the `thinking` key (needed since thinking
+  may now be explicitly present with `type: "disabled"`)
+- Removed Fast Mode override for Opus 4.7 (`speed: "fast"` on Opus 4.7 now errors — Fast
+  Mode is Opus 4.8 / Opus 5 only)
+- Added claude-opus-5 to the Advisor tool's compatible executor/advisor pairings
+
 v0.9.20
 - Fixed a "API key is invalid" error when using ANTHROPIC KEY Valve
 
@@ -902,6 +917,26 @@ async def create_request_payload(
             thinking_config["display"] = thinking_display
 
         payload["thinking"] = thinking_config
+    elif model_info.get("thinking_default_on") and model_info.get(
+        "thinking_can_disable", True
+    ):
+        # Some models (Sonnet 5, Opus 5) run adaptive thinking by default when the
+        # `thinking` field is omitted entirely — unlike Opus 4.6/4.7/4.8, where
+        # omitting it means no thinking. Explicitly disable it so the user's
+        # Thinking toggle is actually honored on these models.
+        _effort_rank = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
+        _disable_ceiling = model_info.get("disable_thinking_max_effort")
+        _current_rank = _effort_rank.get(effective_effort or "high", 2)
+        if _disable_ceiling is None or _current_rank <= _effort_rank[_disable_ceiling]:
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            # e.g. Opus 5 rejects thinking:disabled above effort "high" (400).
+            # Leave the field unset — it will run adaptively at this effort.
+            logger.debug(
+                f"{actual_model_name}: cannot send thinking=disabled at effort="
+                f"{effective_effort} (requires effort<={_disable_ceiling}); "
+                "leaving thinking unset (will run adaptively)."
+            )
 
     # Check if user has memory system enabled
     user_has_memory_system_enabled = False
@@ -1343,7 +1378,12 @@ async def create_request_payload(
             # Check if web_search is actually in the tools list
             has_web_search = any(t.get("name") == "web_search" for t in tools_list)
             if has_web_search:
-                if "thinking" not in payload:
+                # Check whether thinking is actually active, not just whether the
+                # key is present — it may be explicitly {"type": "disabled"} on
+                # models that default to adaptive thinking (Sonnet 5, Opus 5).
+                _thinking_cfg = payload.get("thinking")
+                _thinking_active = bool(_thinking_cfg) and _thinking_cfg.get("type") != "disabled"
+                if not _thinking_active:
                     # No thinking active - enforce web_search
                     payload["tool_choice"] = {"type": "tool", "name": "web_search"}
                     logger.debug("Enforcing web_search via tool_choice")
@@ -2777,6 +2817,7 @@ class Pipe:
     # report max_tokens (custom/Azure endpoints, ENABLED_MODELS manual ids). The
     # live API value always wins for direct Anthropic. Keyed by base (suffix-stripped) id.
     MODEL_MAX_TOKENS_FALLBACK = {
+        "claude-opus-5": 128000,
         "claude-opus-4-8": 64000,
         "claude-opus-4-7": 64000,
         "claude-opus-4-6": 64000,
@@ -2791,14 +2832,34 @@ class Pipe:
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
+            # Thinking is always on for Fable/Mythos; the API rejects an explicit
+            # "disabled" value at any effort, so never send one.
+            "thinking_default_on": True,
+            "thinking_can_disable": False,
         },
          "claude-mythos-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
+            "thinking_default_on": True,
+            "thinking_can_disable": False,
+        },
+        "claude-opus-5": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            # Thinking runs adaptively when the `thinking` param is omitted (unlike
+            # Opus 4.7/4.8, where omitting it means no thinking). `disabled` is only
+            # accepted up to effort "high" — a 400 above that.
+            "thinking_default_on": True,
+            "thinking_can_disable": True,
+            "disable_thinking_max_effort": "high",
         },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
+            # Also on-by-default when omitted, but `disabled` has no effort ceiling.
+            "thinking_default_on": True,
+            "thinking_can_disable": True,
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
@@ -2807,7 +2868,8 @@ class Pipe:
         },
         "claude-opus-4-7": {
             "supports_dynamic_filtering": True,
-            "supports_fast_mode": True,
+            # Fast mode removed for Opus 4.7: speed:"fast" now returns an API error.
+            # Use Opus 4.8 or Opus 5 for Fast Mode.
             "supports_compaction": True,
         },
         "claude-opus-4-6": {
@@ -2851,7 +2913,7 @@ class Pipe:
         )
         ENABLED_MODELS: str = Field(
             default="",
-            description="Comma-separated model ids to expose (e.g. 'claude-opus-4-8,claude-sonnet-5'). "
+            description="Comma-separated model ids to expose (e.g. 'claude-opus-5,claude-sonnet-5'). "
             "Bypasses /v1/models auto-discovery — required for endpoints without it (Azure, some proxies). "
             "Empty = auto-discover from the API.",
         )
@@ -3083,7 +3145,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-mythos-5"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-mythos-5"] = Field(
             default="claude-opus-4-8",
             description="Advisor model ID.",
         )
@@ -4318,15 +4380,17 @@ class Pipe:
             # contain API-supported advisors, so a single membership check covers both
             # "unsupported" and "incompatible" cases.
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-4-6": ["claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-6": ["claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-4-8"],
-                "claude-fable-5": ["claude-fable-5"],
-                "claude-mythos-5": ["claude-mythos-5"],
+                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
+                "claude-opus-5": ["claude-opus-5", "claude-fable-5", "claude-mythos-5"],
+                "claude-fable-5": ["claude-fable-5", "claude-opus-5"],
+                "claude-mythos-5": ["claude-mythos-5", "claude-opus-5"],
             }
-            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-4-8"])
+            allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5", "claude-opus-4-8"])
 
             adjusted_advisor_model = advisor_model
             if advisor_model not in allowed_advisors:
@@ -6344,6 +6408,9 @@ class Pipe:
             # Defaults for fields not in API — overridden by MODEL_CAPABILITY_OVERRIDES
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
+            "thinking_default_on": False,
+            "thinking_can_disable": True,
+            "disable_thinking_max_effort": None,
         }
 
         # Apply model-specific overrides for fields not available from API
@@ -6386,6 +6453,9 @@ class Pipe:
             "supports_effort_max": False,
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
+            "thinking_default_on": False,
+            "thinking_can_disable": True,
+            "disable_thinking_max_effort": None,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:
