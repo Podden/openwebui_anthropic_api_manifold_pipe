@@ -477,7 +477,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote
-from typing import Any, Callable, List, Union, Dict, Optional, Tuple
+from typing import Any, Callable, ClassVar, List, Union, Dict, Optional, Tuple
 from pydantic import BaseModel, Field
 from anthropic import (
     APIStatusError,
@@ -733,10 +733,23 @@ class PipeRequestContext:
     render_strategy: PipeRenderStrategy = field(default_factory=PipeRenderStrategy)
     final_message: list[str] = field(default_factory=list)
 
+    # Content emitted via emit_delta that must not be glued to preceding prose.
+    # Formatters that already carry their own leading newline are unaffected —
+    # the separator is only added when one is missing.
+    BLOCK_CONTENT_PREFIXES: ClassVar[tuple[str, ...]] = ("<details", "⚠️")
+
     async def emit_event(self, event: dict) -> None:
         await self.pipe.emit_event(event, self.event_emitter)
 
     async def emit_delta(self, content: str) -> None:
+        # Rendered carriers/notices must start on their own line or markdown
+        # swallows them into the preceding paragraph.  Text deltas must NOT get
+        # that separator (see handle_text_block_stop), so the newline is added
+        # here, only for block-level content and only when one is missing.
+        if content.startswith(self.BLOCK_CONTENT_PREFIXES):
+            text = self.text()
+            if text and not text.endswith(("\n", "\r")):
+                content = "\n" + content
         await self.emit_event({"type": "message", "data": {"content": content}})
         self.final_message.append(content)
 
@@ -2582,28 +2595,23 @@ async def handle_text_block_stop(
     chunk: str,
     chunk_count: int,
     pending_citation_markers: list[int],
-    final_message: list[str],
-    final_text: Callable[[], str],
     emit_delta: Callable[[str], Awaitable[None]],
 ) -> tuple[str, int, list[int]]:
-    had_citation = False
     if pending_citation_markers:
         chunk += "".join(f"[{n}]" for n in pending_citation_markers)
         pending_citation_markers = []
-        had_citation = True
     if chunk:
-        # Web-search answers arrive as MULTIPLE text blocks split around their
-        # citation markers.  Forcing a trailing newline after every block put a
-        # line break right after each `[n]`, breaking cited prose onto separate
-        # lines.  Only add the separator newline for non-citation blocks (those
-        # precede tool/details blocks); cited segments must flow inline.
-        if not had_citation and not chunk.endswith("\n"):
-            chunk += "\n"
+        # A text block boundary is NOT a line boundary: cited answers arrive as
+        # MANY adjacent text blocks (one per cited span plus one per connector
+        # fragment like ", and "), so appending a newline per block injected a
+        # <br> mid-sentence (OpenWebUI renders markdown with breaks enabled) and
+        # broke any markdown table row containing a cited span.  Emit the text
+        # verbatim; separation from rendered <details> carriers is handled where
+        # those blocks are emitted (PipeRequestContext.emit_delta and
+        # _append_block_to_text).
         await emit_delta(chunk)
         chunk = ""
         chunk_count = 0
-    elif final_message and not final_text().endswith("\n"):
-        await emit_delta("\n")
     return chunk, chunk_count, pending_citation_markers
 
 
@@ -7854,8 +7862,6 @@ class Pipe:
                                         chunk=chunk,
                                         chunk_count=chunk_count,
                                         pending_citation_markers=pending_citation_markers,
-                                        final_message=final_message,
-                                        final_text=final_text,
                                         emit_delta=emit_message_delta,
                                     )
                                 elif content_type == "compaction":
