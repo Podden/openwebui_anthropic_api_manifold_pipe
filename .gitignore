@@ -210,3 +210,6 @@ __marimo__/
 *.chatmode.md
 # Generated deploy artifact (built via helpers/minify_pipe.py)
 anthropic_pipe.min.py
+
+# Parked work-in-progress (see .wip/*/RESTORE.md)
+.wip/

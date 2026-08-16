@@ -92,6 +92,21 @@ class PipeModelSupportMethods:
         info.update(overrides)
         return info
 
+    def _model_cache_signature(self) -> str:
+        """Fingerprint of the settings the model list depends on.
+
+        The API key is hashed rather than stored so the signature can be logged
+        safely. Any change here means the cached list came from a different
+        endpoint or allow-list and must not be reused.
+        """
+        parts = [
+            (self.valves.ANTHROPIC_API_KEY or "").strip(),
+            (self.valves.ANTHROPIC_BASE_URL or "").strip(),
+            (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip(),
+            (getattr(self.valves, "ENABLED_MODELS", "") or "").strip(),
+        ]
+        return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
+
     async def get_anthropic_models(self) -> List[dict]:
         """
         Fetches the current list of Anthropic models using the official Anthropic Python SDK.
@@ -109,11 +124,17 @@ class PipeModelSupportMethods:
                 for name in enabled_list
             ]
 
-        # Return cached result if still fresh
-        if (
+        # Return cached result if still fresh AND fetched with the same
+        # connection settings. A TTL of 0 disables caching entirely.
+        cache_sig = self._model_cache_signature()
+        ttl = int(getattr(self.valves, "MODEL_CACHE_TTL_MINUTES", 1440)) * 60
+        cache_valid = (
             self._api_capabilities_cache
-            and time.time() - self._api_capabilities_cache_ts < self._API_CACHE_TTL
-        ):
+            and cache_sig == self._api_capabilities_cache_sig
+            and ttl > 0
+            and time.time() - self._api_capabilities_cache_ts < ttl
+        )
+        if cache_valid:
             models = []
             for name, info in self._api_capabilities_cache.items():
                 models.append(self._build_openwebui_model_entry(name, info))
@@ -147,14 +168,20 @@ class PipeModelSupportMethods:
             # Update class-level cache
             Pipe._api_capabilities_cache = new_cache
             Pipe._api_capabilities_cache_ts = time.time()
+            Pipe._api_capabilities_cache_sig = cache_sig
             logger.info(f"Cached capabilities for {len(new_cache)} models from API")
             return models
         except Exception as e:
             logging.warning(
                 f"Could not fetch models from SDK/API: {e}"
             )
-            # If we have stale cache, use it
-            if self._api_capabilities_cache:
+            # If we have stale cache from the same endpoint, use it. A cache from
+            # different connection settings would advertise the wrong endpoint's
+            # models, which is worse than showing none.
+            if (
+                self._api_capabilities_cache
+                and self._api_capabilities_cache_sig == cache_sig
+            ):
                 logging.info("Using stale capability cache as fallback")
                 for name, info in self._api_capabilities_cache.items():
                     models.append(self._build_openwebui_model_entry(name, info))

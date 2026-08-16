@@ -15,6 +15,7 @@ This repo holds one OpenWebUI manifold pipe for the Anthropic Messages API plus 
 | Compile the single-file artifact | `python helpers/build_anthropic_pipe.py` |
 | Minify it for upload | `python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check` |
 | Pull the current artifact back into the template | `python helpers/build_anthropic_pipe.py --refresh-template` |
+| Check model-list caching and invalidation | `python helpers/test_model_cache.py` (fakes the Anthropic client, no network) |
 
 `--refresh-template` overwrites `src/anthropic_pipe/pipe_template.py` with the current artifact minus its generated sections. Use it only when the template drifted, never as a normal step.
 
@@ -66,6 +67,7 @@ Two module lists in `helpers/build_anthropic_pipe.py` are load-bearing:
 - Cache breakpoints must stay stable across turns: anything appended per-request (memory, RAG, tool order) above a breakpoint invalidates the whole prefix. Tools are appended name-sorted for exactly this reason.
 - Be careful with cache control around thinking blocks and programmatic tool-calling flows.
 - Do not send empty location values for Anthropic web-search configuration.
+- The model-list cache is class-level and must stay fingerprinted against the connection settings (`_model_cache_signature`). Adding a valve that changes which models an endpoint returns means adding it to that signature.
 - Task requests and sub-agent runs must return plain prose: no collapsibles, no replay carriers, no token footer, no metadata markers.
 
 ## Common failure patterns

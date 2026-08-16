@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.24`
+- **Current pipe version:** `0.9.25`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -118,6 +118,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `REQUEST_TIMEOUT` | `300` | Anthropic API timeout in seconds |
 | `TOOL_CALL_TIMEOUT` | `30` | Per-tool execution timeout in seconds |
 | `ENABLE_CACHE_DIAGNOSTICS` | `false` | Logs cache-prefix diffs between turns. Debugging only |
+| `MODEL_CACHE_TTL_MINUTES` | `1440` | How long the discovered model list is cached (`0` = re-fetch on every model list render). Changing API key, base URL, workspace or `ENABLED_MODELS` refreshes immediately regardless |
 
 #### `CACHE_CONTROL` options
 
@@ -209,6 +210,11 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.25`
+- Added `MODEL_CACHE_TTL_MINUTES` (default `1440`, `0` disables caching): controls how long the discovered model list is cached. The 24h TTL used to be hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
+- Fixed the model cache surviving a connection change — the cached list is fingerprinted against API key, base URL, workspace ID and `ENABLED_MODELS`. Repointing the pipe at a different endpoint used to keep serving the old endpoint's models for up to 24 hours
+- A failed model refresh no longer falls back to a cache fetched with different connection settings
+
 ### `v0.9.24`
 - Fixed the context-window reading OpenWebUI uses for auto-compaction: `prompt_tokens` / `completion_tokens` now carry the last call's full input (uncached + cache writes + cache reads). `input_tokens` / `output_tokens` stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly and compaction fired far too late or never
 - Sub-agent runs (OpenWebUI 0.11) return plain prose: no collapsibles, replay carriers, token footer, or metadata markers — their text is pasted into the parent agent's context, where all of that is pure token cost
@@ -379,6 +385,7 @@ You only need Python 3.11+ to build — the build and minify scripts use the sta
 | `src/anthropic_pipe/` | Maintainable sources — **edit here** |
 | `helpers/build_anthropic_pipe.py` | Compiles the sources into the single-file artifact |
 | `helpers/minify_pipe.py` | Strips comments/docstrings for a smaller upload artifact |
+| `helpers/test_model_cache.py` | Self-check for model-list caching and invalidation (`python helpers/test_model_cache.py`) |
 | `anthropic_pipe.py` | **Generated** single-file pipe (this is what you install) |
 | `anthropic_pipe.min.py` | **Generated** minified pipe (git-ignored) |
 | `anthropic_pipe_*_toggle.py`, `anthropic_manifold_companion_filter.py` | Standalone filters, edited directly |

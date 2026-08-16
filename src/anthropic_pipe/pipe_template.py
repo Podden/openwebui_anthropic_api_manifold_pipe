@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.24
+version: 0.9.25
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,11 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.25
+- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching) to control how long the discovered model list is cached. Previously the 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
+- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models for up to 24 hours
+- A failed model refresh no longer falls back to a cache that was fetched from different connection settings -- showing the wrong endpoint's models is worse than showing none
+
 v0.9.24
 - Fixed the context-window reading OpenWebUI uses for auto-compaction: prompt_tokens/completion_tokens now carry the last call's full input (uncached + cache writes + cache reads) instead of being absent. input_tokens/output_tokens stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly, and compaction fired far too late or never
 - Sub-agent runs (OpenWebUI 0.11) now return plain prose: no collapsibles, no replay carriers, no token footer, no metadata markers. Their text is pasted into the parent agent's context, where all of that is pure token cost
@@ -1101,7 +1106,12 @@ class Pipe:
     # Cached model capabilities from API (populated by get_anthropic_models)
     _api_capabilities_cache: Dict[str, dict] = {}
     _api_capabilities_cache_ts: float = 0.0
-    _API_CACHE_TTL = 86400  # 24 hours
+    _API_CACHE_TTL = 86400  # 24 hours; overridden by MODEL_CACHE_TTL_MINUTES
+    # Fingerprint of the connection settings the cached model list was fetched
+    # with. A changed key, base URL, workspace or allow-list must invalidate the
+    # cache immediately -- otherwise pointing the pipe at a different endpoint
+    # keeps serving the previous endpoint's models until the TTL expires.
+    _api_capabilities_cache_sig: str = ""
 
     REQUEST_TIMEOUT = (
         300  # Default; overridden by valve REQUEST_TIMEOUT
@@ -1277,6 +1287,16 @@ class Pipe:
         ENABLE_CACHE_DIAGNOSTICS: bool = Field(
             default=False,
             description="Enable Cache Diagnostics. For debugging and development only"
+        )
+        MODEL_CACHE_TTL_MINUTES: int = Field(
+            default=1440,
+            ge=0,
+            le=43200,
+            description="How long the discovered model list and its capabilities are "
+            "cached, in minutes (default 1440 = 24h). Set to 0 to re-fetch on every "
+            "model list render — useful right after Anthropic ships a new model. "
+            "Changing the API key, base URL, workspace or ENABLED_MODELS always "
+            "refreshes immediately, regardless of this setting.",
         )
 
     class UserValves(BaseModel):
