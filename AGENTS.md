@@ -6,14 +6,14 @@ This repo holds one OpenWebUI manifold pipe for the Anthropic Messages API plus 
 
 ## Golden rule
 
-`anthropic_pipe.py` and `anthropic_pipe.min.py` are **generated**. Edit `src/anthropic_pipe/**`, then rebuild. Hand-edits to the generated sections are lost on the next build.
+`anthropic_pipe.py` and `anthropic_pipe.min.py` are **generated** (both committed). Edit `src/anthropic_pipe/**`, then rebuild. Hand-edits to the generated sections are lost on the next build.
 
 ## Build
 
 | Need | Command (from repo root) |
 |---|---|
 | Compile the single-file artifact | `python helpers/build_anthropic_pipe.py` |
-| Minify it for upload | `python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check` |
+| Minify it standalone (the build already does this) | `python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check` |
 | Pull the current artifact back into the template | `python helpers/build_anthropic_pipe.py --refresh-template` |
 | Check model-list caching and invalidation | `python helpers/test_model_cache.py` (fakes the Anthropic client, no network) |
 | Check API key encryption at rest | `python helpers/test_valve_encryption.py` (runs against the built artifact) |
@@ -35,7 +35,7 @@ The build works by marker pairs (`# BEGIN/END GENERATED SECTION: anthropic_pipe.
 | `helpers/build_anthropic_pipe.py` | Compiles `src/` into `anthropic_pipe.py`. |
 | `helpers/minify_pipe.py` | Strips comments/docstrings (keeps the module docstring OpenWebUI parses) for the upload artifact. |
 | `anthropic_pipe.py` | Generated single-file OpenWebUI artifact (committed; this is what users install). |
-| `anthropic_pipe.min.py` | Generated minified artifact (git-ignored). |
+| `anthropic_pipe.min.py` | Generated minified artifact. Committed too -- it is offered as an install source, so it must never lag behind `anthropic_pipe.py`. The build writes both. |
 | `anthropic_manifold_companion_filter.py` | Routes OpenWebUI's built-in web_search / code_interpreter buttons to Anthropic-native tools. |
 | `anthropic_pipe_{thinking,web_search,code_execution,files}_toggle.py` | One-shot toggle filters. |
 | `README.md` | User-facing docs: install, valves, changelog. Keep the changelog in sync with the template docstring. |
@@ -90,7 +90,6 @@ Two module lists in `helpers/build_anthropic_pipe.py` are load-bearing:
 
 1. Change `src/anthropic_pipe/**`.
 2. Bump `version:` and add a changelog entry in `src/anthropic_pipe/pipe_template.py`.
-3. `python helpers/build_anthropic_pipe.py`
-4. `python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check`
-5. Mirror the changelog entry into `README.md` and update the "Current pipe version" line.
-6. Commit `src/` **and** the regenerated `anthropic_pipe.py`.
+3. `python helpers/build_anthropic_pipe.py` (writes `anthropic_pipe.py` and `anthropic_pipe.min.py`)
+4. Mirror the changelog entry into `README.md` and update the "Current pipe version" line.
+5. Commit `src/` **and** both regenerated artifacts.

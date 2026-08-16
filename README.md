@@ -49,7 +49,7 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 ### Option 2: Manual installation
 
 1. Open **Admin Settings** → **Functions** → **+ New Function**
-2. Paste the source of [`anthropic_pipe.py`](anthropic_pipe.py) from this repo
+2. Paste the source of [`anthropic_pipe.py`](anthropic_pipe.py) from this repo — or [`anthropic_pipe.min.py`](anthropic_pipe.min.py), the same pipe with comments and docstrings stripped (~28% smaller, quicker to paste)
 3. Repeat for the toggle filters you want to use (`anthropic_pipe_thinking_toggle.py`, `anthropic_pipe_web_search_toggle.py`, `anthropic_pipe_code_execution_toggle.py`, `anthropic_pipe_files_toggle.py`)
 4. Optionally install the **Companion Filter**
 5. Set the admin valves described below
@@ -402,7 +402,7 @@ You only need Python 3.11+ to build — the build and minify scripts use the sta
 | `helpers/test_model_cache.py` | Self-check for model-list caching and invalidation (`python helpers/test_model_cache.py`) |
 | `helpers/test_valve_encryption.py` | Self-check for API key encryption at rest (`python helpers/test_valve_encryption.py`) |
 | `anthropic_pipe.py` | **Generated** single-file pipe (this is what you install) |
-| `anthropic_pipe.min.py` | **Generated** minified pipe (git-ignored) |
+| `anthropic_pipe.min.py` | **Generated** minified pipe (also committed, written by the same build) |
 | `anthropic_pipe_*_toggle.py`, `anthropic_manifold_companion_filter.py` | Standalone filters, edited directly |
 
 Inside `src/anthropic_pipe/`, `request/` holds everything that converges on the request payload, `response/` has one module per Anthropic `content_block` family plus rendering helpers, `shared/` holds model discovery and OpenWebUI task handling, and `pipe_template.py` carries the pipe frontmatter (title, version, requirements) and the class skeleton.
@@ -410,12 +410,11 @@ Inside `src/anthropic_pipe/`, `request/` holds everything that converges on the 
 ### Build
 
 ```bash
-# 1. compile src/ into anthropic_pipe.py
+# compiles src/ into anthropic_pipe.py and anthropic_pipe.min.py
 python helpers/build_anthropic_pipe.py
-
-# 2. optional: minified upload artifact, verified with py_compile
-python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check
 ```
+
+Both artifacts are committed and both are offered as an install source, so the build writes them together — the minified one can never lag behind. It is also compile-checked before it is written.
 
 Do **not** hand-edit the `# BEGIN/END GENERATED SECTION` blocks in `anthropic_pipe.py` — the next build overwrites them. If the artifact and the template ever drift apart, pull the artifact back in with `python helpers/build_anthropic_pipe.py --refresh-template`.
 

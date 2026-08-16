@@ -18,6 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPE_DIR = REPO_ROOT
 PIPE_FILE = PIPE_DIR / "anthropic_pipe.py"
+MIN_FILE = PIPE_DIR / "anthropic_pipe.min.py"
 SRC_DIR = PIPE_DIR / "src" / "anthropic_pipe"
 TEMPLATE_SOURCE = SRC_DIR / "pipe_template.py"
 PAYLOAD_SOURCE = SRC_DIR / "request" / "payload.py"
@@ -337,6 +338,38 @@ def build() -> None:
     text = _replace_payload_method_with_delegate(text)
     PIPE_FILE.write_text(text, encoding="utf-8", newline="\n")
     print(f"built {PIPE_FILE.relative_to(REPO_ROOT)}")
+    write_minified(text)
+
+
+def write_minified(source: str) -> None:
+    """Refresh the minified artifact alongside the full one.
+
+    Both files are committed and both are offered as an install source, so the
+    minified one must never lag behind: a stale copy would hand users an older
+    pipe than the repo advertises. Building it here removes the chance of
+    forgetting the separate minify step.
+    """
+    import py_compile
+    import tempfile
+
+    from minify_pipe import minify
+
+    minified = minify(source)
+    # Compile before publishing: the minifier rewrites the token stream, and a
+    # syntactically broken artifact must not reach the repo.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".py", encoding="utf-8", delete=False, newline="\n"
+    ) as handle:
+        handle.write(minified)
+        probe = Path(handle.name)
+    try:
+        py_compile.compile(str(probe), doraise=True)
+    finally:
+        probe.unlink(missing_ok=True)
+
+    MIN_FILE.write_text(minified, encoding="utf-8", newline="\n")
+    saved = (1 - len(minified.encode("utf-8")) / len(source.encode("utf-8"))) * 100
+    print(f"built {MIN_FILE.relative_to(REPO_ROOT)} ({saved:.1f}% smaller)")
 
 
 def refresh_template() -> None:
