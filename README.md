@@ -6,11 +6,12 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.16`
-- **Recommended OpenWebUI:** `0.9.0+`
+- **Current pipe version:** `0.9.24`
+- **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
+- **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
-- **Current Anthropic model docs focus on:** `Claude Fable 5`, `Claude Opus 4.8`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`
+- **Current Anthropic model docs focus on:** `Claude Opus 5`, `Claude Sonnet 5`, `Claude Fable 5`, `Claude Opus 4.8`, `Claude Haiku 4.5`
 
 This pipe targets the **Anthropic Messages API** directly through the official **Anthropic Python SDK** and keeps the OpenWebUI experience close to Anthropic-native behavior while still playing nicely with OpenWebUI models, tools, filters, files, notes, channels, and task generation.
 
@@ -48,8 +49,8 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 ### Option 2: Manual installation
 
 1. Open **Admin Settings** → **Functions** → **+ New Function**
-2. Paste the source for `anthropic_pipe.py`
-3. Repeat for the toggle filters you want to use
+2. Paste the source of [`anthropic_pipe.py`](anthropic_pipe.py) from this repo
+3. Repeat for the toggle filters you want to use (`anthropic_pipe_thinking_toggle.py`, `anthropic_pipe_web_search_toggle.py`, `anthropic_pipe_code_execution_toggle.py`, `anthropic_pipe_files_toggle.py`)
 4. Optionally install the **Companion Filter**
 5. Set the admin valves described below
 
@@ -92,24 +93,31 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `ANTHROPIC_API_KEY` | required | Anthropic API key used by the pipe unless overridden by a per-user key |
-| `ANTHROPIC_BASE_URL` | `""` | Optional custom base URL / proxy for Anthropic API requests |
-| `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` research-preview speed tier on models this pipe marks as fast-mode capable |
+| `ANTHROPIC_API_KEY` | `$ANTHROPIC_API_KEY` | Anthropic API key, unless overridden by a per-user key. Falls back to the `ANTHROPIC_API_KEY` environment variable |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom base URL / proxy (Azure, `aws-external-anthropic`, gateways) |
+| `ENABLED_MODELS` | `""` | Comma-separated model IDs to expose. Bypasses `/v1/models` auto-discovery — needed for endpoints without a models API |
+| `ANTHROPIC_WORKSPACE_ID` | `""` | Experimental: "Claude on AWS" workspace ID, sent as the `anthropic-workspace-id` header |
+| `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` tier on Opus models that support it (up to ~2.5x faster, higher cost) |
+| `REFUSAL_FALLBACK` | `off` | Retry a safety-refused request server-side: `off`, `default` (Anthropic's per-category recommendation), or a pinned model. Claude API only |
 | `ENABLE_INTERLEAVED_THINKING` | `true` | Allows thinking blocks between tool calls where supported |
 | `WEB_SEARCH` | `true` | Enables Anthropic native web search |
 | `WEB_FETCH` | `true` | Enables Anthropic native URL fetch |
 | `MAX_TOOL_CALLS` | `15` | Maximum Claude → tool → Claude loop count per request |
 | `MAX_RETRIES` | `3` | Retries for overload, rate limits, and transient transport/provider errors |
-| `CACHE_CONTROL` | `cache tools array, system prompt and messages` | Prompt caching scope |
-| `CACHE_TTL` | `5 minutes` | Anthropic cache TTL (`1 hour` is also supported) |
+| `CACHE_CONTROL` | `cache tools array, system prompt and messages` | Prompt caching scope (see below) |
+| `CACHE_TTL` | `5 minutes` | Anthropic cache TTL (`1 hour` is also supported, at higher write cost) |
+| `CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT` | `same as CACHE_TTL` | Separate TTL for tools array + system prompt, independent of messages. Useful for big multi-user setups |
+| `MEMORY_REVIEW_MODEL` | `claude-haiku-4-5` | Model used for OpenWebUI's background memory review (`same as chat model` to disable the override) |
 | `WEB_SEARCH_USER_CITY / REGION / COUNTRY / TIMEZONE` | `""` | Default search-location hints for Anthropic web search |
 | `ENABLE_PROGRAMMATIC_TOOL_CALLING` | `false` | Allows Claude to call OpenWebUI tools from inside code execution |
-| `ENABLE_BASH_TOOL` | `false` | Enable Claude's native `bash_20250124` tool, bridged to Open Terminal's `run_command`. Only activates when `run_command` is present in tools. |
-| `ENABLE_TEXT_EDITOR_TOOL` | `false` | Enable Claude's native `text_editor_20250728` (`str_replace_based_edit_tool`), bridged to `write_file` + `replace_file_content` (+ `run_command` fallback for `view`/`insert`). Only activates when both callables are present. |
+| `ENABLE_BASH_TOOL` | `false` | Experimental: Claude's native `bash_20250124` tool, bridged to Open Terminal's `run_command`. Only activates when `run_command` is present in tools |
+| `BASH_TOOL_TIMEOUT` | `120` | Seconds to wait for an Open Terminal bash command before returning partial output |
+| `ENABLE_TEXT_EDITOR_TOOL` | `false` | Experimental: Claude's native `text_editor_20250728` (`str_replace_based_edit_tool`), bridged to `write_file` + `replace_file_content` (+ `run_command` fallback for `view`/`insert`). Only activates when both callables are present |
 | `TEXT_EDITOR_MAX_CHARACTERS` | `10000` | Anthropic-side truncation limit for text_editor `view` results |
-| `DATA_RESIDENCY` | `global` | Anthropic `inference_geo` routing: `global` or `us` |
+| `DATA_RESIDENCY` | `global` | Anthropic `inference_geo` routing: `global` or `us` (`us` costs 1.1x tokens) |
 | `REQUEST_TIMEOUT` | `300` | Anthropic API timeout in seconds |
 | `TOOL_CALL_TIMEOUT` | `30` | Per-tool execution timeout in seconds |
+| `ENABLE_CACHE_DIAGNOSTICS` | `false` | Logs cache-prefix diffs between turns. Debugging only |
 
 #### `CACHE_CONTROL` options
 
@@ -127,12 +135,13 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `ANTHROPIC_API_KEY` | `""` | Personal key override for the admin key |
-| `ENABLE_THINKING` | `false` | Enables extended thinking |
+| `ENABLE_THINKING` | `false` | Enables extended thinking. On models with thinking on by default (Opus 5 / Sonnet 5) turning it **off** actively disables thinking |
 | `THINKING_BUDGET_TOKENS` | `8192` | Manual thinking budget for models that still use `budget_tokens` |
-| `THINKING_DISPLAY` | `summarized` | `summarized` or `omitted` |
-| `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support) |
-| `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` |
-| `DEBUG_MODE` | `false` | Extra logging and status output |
+| `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text |
+| `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
+| `HIDE_BLOCKS` | `""` | Comma-separated block types to hide from the chat display (still replayed to the API): `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
+| `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
+| `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
 
 #### Search, files, and skills
 
@@ -153,9 +162,9 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ENABLE_TOOL_SEARCH` | `true` | Deferred tool loading with search for large tool sets (beta `advanced-tool-use-2025-11-20`) |
 | `TOOL_SEARCH_TYPE` | `bm25` | Tool search mode: `bm25` or `regex` |
 | `TOOL_SEARCH_MAX_DESCRIPTION_LENGTH` | `100` | Tools with longer JSON definitions are deferred for lazy loading |
-| `TOOL_SEARCH_EXCLUDE_TOOLS` | `[web_search, web_fetch, code_execution_20250825, code_execution_20260120]` | Always keep these tools loaded |
-| `ENABLE_ADVISOR_TOOL` | `false` | Enables the Advisor tool (beta `advisor-tool-2026-03-01`). Executor model consults a stronger advisor (Opus 4.7) mid-generation for strategic guidance. Billed at the advisor's rate. |
-| `ADVISOR_MODEL` | `claude-opus-4-7` | Advisor model (only `claude-opus-4-7` is currently supported) |
+| `TOOL_SEARCH_EXCLUDE_TOOLS` | Anthropic server tools + OpenWebUI built-ins + Open Terminal tools | Always keep these tools loaded |
+| `ENABLE_ADVISOR_TOOL` | `false` | Enables the Advisor tool (beta `advisor-tool-2026-03-01`). Executor model consults a stronger advisor mid-generation for strategic guidance. Billed at the advisor's rate. |
+| `ADVISOR_MODEL` | `claude-opus-5` | Advisor model: `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5` (auto-adjusted if incompatible) |
 | `ADVISOR_MAX_USES` | `0` | Max advisor calls per request (`0` = unlimited). Beyond this, further calls return `advisor_tool_result_error` with `max_uses_exceeded`. |
 | `ADVISOR_CACHING` | `off` | Ephemeral prompt caching for the advisor transcript: `off`, `5m`, or `1h` |
 
@@ -175,8 +184,9 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 ### Important behavior notes
 
-- On **Opus 4.7 / Opus 4.6 / Sonnet 4.6**, the pipe automatically prefers **adaptive thinking** when the model advertises it.
-- Anthropic now recommends **`effort`** as the main control for adaptive-thinking models. `xhigh` is **Opus 4.7 only**. `max` is available on **Opus 4.7 / Opus 4.6 / Sonnet 4.6**.
+- The pipe automatically prefers **adaptive thinking** whenever the model advertises it (Opus 5, Sonnet 5, Opus 4.8/4.7/4.6, Sonnet 4.6).
+- Anthropic recommends **`effort`** as the main control for adaptive-thinking models. Effort levels are clamped per model from the Models API, so unsupported values (`xhigh`, `max`) degrade instead of erroring.
+- On **Opus 5 / Sonnet 5**, thinking is **on by default**. Switching `ENABLE_THINKING` off sends `thinking: {"type": "disabled"}` and clamps effort to `high`, because Opus 5 rejects disabled thinking at `xhigh`/`max`.
 - `THINKING_DISPLAY="omitted"` suppresses streamed `thinking_delta` events, matching Anthropic's streaming behavior.
 - `USE_FILES_API` **overrides** native PDF upload. If enabled, the pipe uploads files to Anthropic and injects `container_upload` blocks at the correct message positions.
 - Anthropic's **Files API** supports create-once / use-many flows, but remains **beta**.
@@ -199,6 +209,56 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.24`
+- Fixed the context-window reading OpenWebUI uses for auto-compaction: `prompt_tokens` / `completion_tokens` now carry the last call's full input (uncached + cache writes + cache reads). `input_tokens` / `output_tokens` stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly and compaction fired far too late or never
+- Sub-agent runs (OpenWebUI 0.11) return plain prose: no collapsibles, replay carriers, token footer, or metadata markers — their text is pasted into the parent agent's context, where all of that is pure token cost
+- Task models (title, tags, follow-ups, queries, image prompts, autocomplete, memory review) pin their response shape with structured outputs
+- Added the OpenWebUI 0.11 builtin tools to the tool-search exclude list: `notify`, `timer`, `delegate_task`, `list_chat_files`, `grep_chat_files`, `query_chat_files`
+- Fixed sampling params being sent to adaptive-thinking models on endpoints without capability metadata (Azure/proxies, manual `ENABLED_MODELS`), which the API answered with a 400 (#36, reported by @attilaolah)
+- Corrected stale static model limits: Opus 4.6/4.7/4.8 and Sonnet 4.6 serve 128k output, Sonnet 4.5 serves a 1M window, and the 1M window no longer needs a beta header
+- Requires `anthropic>=0.121.0`
+
+### `v0.9.23`
+- Added **Claude Opus 5** (`claude-opus-5`): 1M context, 128k output, thinking on by default, full effort ladder incl. `max`, fast mode
+- Thinking Toggle now works on thinking-on-by-default models: turning it off sends `thinking: {"type": "disabled"}` and clamps effort to `high`
+- Added `REFUSAL_FALLBACK` valve: retry a safety-refused request server-side, on Anthropic's per-category recommendation or a pinned model
+- Removed Fast Mode for Opus 4.7 (2026-07-24): `speed: "fast"` now errors there
+- Fixed a prompt-cache killer: user tools are appended name-sorted, so OpenWebUI's shifting tool order no longer rebuilds the whole cache
+
+### `v0.9.22`
+- Compatibility with OpenWebUI's `ENABLE_MEMORY_BACKGROUND_REVIEW`: task requests forward their system prompt again
+- Added `MEMORY_REVIEW_MODEL` valve to run background memory review on a cheap model (default Haiku)
+- Task requests are stripped to plain prose: no collapsibles, cache diagnostics, replay carriers, or inline markers
+- `HIDE_BLOCKS` moved from admin Valves to UserValves
+
+### `v0.9.21`
+- Added `HIDE_BLOCKS` valve to hide individual collapsibles: `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction`
+- Added `CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT` valve to cache system prompt and tools array for an hour separately
+- Compatibility with the new OpenWebUI memory format so the cache stays stable
+- Added cached-% and multi-call count to the token display
+- Fixed markdown breaking at text `content_block` boundaries
+
+### `v0.9.20`
+- Fixed an "API key is invalid" error when using the `ANTHROPIC_API_KEY` valve
+
+### `v0.9.19`
+- Removed static `ANTHROPIC_BUILTIN_TOOL_NAMES` in favor of a default `TOOL_SEARCH_EXCLUDE_TOOLS` covering all OpenWebUI internal tools
+- Fixed Open Terminal tool calls and `read_file` bugs; experimental bash and text_editor support now works
+- Fixed token explosion on requests containing images and binary files from older `read_file` calls
+
+### `v0.9.18`
+- Client tool results with base64 image data are converted into Anthropic image blocks instead of raw base64 text
+- Uses OpenWebUI's native image compression user settings
+- Added **Claude Sonnet 5** (`claude-sonnet-5`): 1M context, 128k output, adaptive thinking on by default
+- Experimental Claude on AWS support via `ANTHROPIC_WORKSPACE_ID`
+- Added `ENABLED_MODELS` valve + date-suffix normalization + static model fallback for endpoints without `/v1/models`
+- Reads the `ANTHROPIC_API_KEY` environment variable
+- Fixed file downloads from the code execution container via the Files API
+
+### `v0.9.17`
+- Added Fable and Mythos as advisor models
+- Advisor model is dynamically adjusted to the next best model if incompatible
+
 ### `v0.9.16`
 - Added Claude Fable and Mythos 5 alongside new stop_reasons and refusals
 
@@ -305,6 +365,41 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 - `web_search_20260209` support
 
 </details>
+
+---
+
+## 🛠️ Development
+
+You only need Python 3.11+ to build — the build and minify scripts use the standard library only. The Anthropic SDK is a runtime dependency of the pipe inside OpenWebUI, not of the build.
+
+### Repo layout
+
+| Path | Role |
+|------|------|
+| `src/anthropic_pipe/` | Maintainable sources — **edit here** |
+| `helpers/build_anthropic_pipe.py` | Compiles the sources into the single-file artifact |
+| `helpers/minify_pipe.py` | Strips comments/docstrings for a smaller upload artifact |
+| `anthropic_pipe.py` | **Generated** single-file pipe (this is what you install) |
+| `anthropic_pipe.min.py` | **Generated** minified pipe (git-ignored) |
+| `anthropic_pipe_*_toggle.py`, `anthropic_manifold_companion_filter.py` | Standalone filters, edited directly |
+
+Inside `src/anthropic_pipe/`, `request/` holds everything that converges on the request payload, `response/` has one module per Anthropic `content_block` family plus rendering helpers, `shared/` holds model discovery and OpenWebUI task handling, and `pipe_template.py` carries the pipe frontmatter (title, version, requirements) and the class skeleton.
+
+### Build
+
+```bash
+# 1. compile src/ into anthropic_pipe.py
+python helpers/build_anthropic_pipe.py
+
+# 2. optional: minified upload artifact, verified with py_compile
+python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check
+```
+
+Do **not** hand-edit the `# BEGIN/END GENERATED SECTION` blocks in `anthropic_pipe.py` — the next build overwrites them. If the artifact and the template ever drift apart, pull the artifact back in with `python helpers/build_anthropic_pipe.py --refresh-template`.
+
+Version bumps and changelog entries go into the module docstring of `src/anthropic_pipe/pipe_template.py`, then get mirrored into this README.
+
+See [`AGENTS.md`](AGENTS.md) for architecture anchors, invariants, and common failure patterns.
 
 ---
 

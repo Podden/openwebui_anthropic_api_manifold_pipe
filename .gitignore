@@ -208,3 +208,5 @@ __marimo__/
 
 # VS Code AI Stuff
 *.chatmode.md
+# Generated deploy artifact (built via helpers/minify_pipe.py)
+anthropic_pipe.min.py

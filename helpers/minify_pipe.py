@@ -116,8 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     out_lines = minified.count("\n") + 1
     saved = (1 - out_size / in_size) * 100 if in_size else 0
     print(f"Wrote {out_path}")
-    print(f"  size:  {in_size:,} → {out_size:,} bytes ({saved:.1f}% smaller)")
-    print(f"  lines: {in_lines:,} → {out_lines:,}")
+    print(f"  size:  {in_size:,} -> {out_size:,} bytes ({saved:.1f}% smaller)")
+    print(f"  lines: {in_lines:,} -> {out_lines:,}")
 
     if args.check:
         import py_compile
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             py_compile.compile(str(out_path), doraise=True)
             print("  py_compile: OK")
         except py_compile.PyCompileError as e:
-            print(f"  py_compile: FAILED — {e}")
+            print(f"  py_compile: FAILED - {e}")
             return 1
     return 0
 
