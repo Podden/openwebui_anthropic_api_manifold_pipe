@@ -93,7 +93,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `ANTHROPIC_API_KEY` | `$ANTHROPIC_API_KEY` | Anthropic API key, unless overridden by a per-user key. Falls back to the `ANTHROPIC_API_KEY` environment variable |
+| `ANTHROPIC_API_KEY` | `$ANTHROPIC_API_KEY` | Anthropic API key, unless overridden by a per-user key. Falls back to the `ANTHROPIC_API_KEY` environment variable. Stored encrypted, see [below](#-api-key-storage) |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom base URL / proxy (Azure, `aws-external-anthropic`, gateways) |
 | `ENABLED_MODELS` | `""` | Comma-separated model IDs to expose. Bypasses `/v1/models` auto-discovery — needed for endpoints without a models API |
 | `ANTHROPIC_WORKSPACE_ID` | `""` | Experimental: "Claude on AWS" workspace ID, sent as the `anthropic-workspace-id` header |
@@ -197,6 +197,18 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 - `ENABLE_DYNAMIC_FILTERING` improves quality for supported web-search / web-fetch models but is **substantially slower** than the normal flow.
 - There is **no dedicated Claude memory tool** documented here anymore. This README intentionally reflects the current pipe surface only.
 
+### 🔐 API key storage
+
+The API key valve — admin-wide and the per-user override — is encrypted before it reaches the database: Fernet, with the key derived from `WEBUI_SECRET_KEY` the same way OpenWebUI derives it.
+
+| Situation | What happens |
+|-----------|--------------|
+| **Default OpenWebUI install, any version** | The pipe encrypts the key. OpenWebUI's own valve encryption is **off unless you set `ENABLE_VALVE_ENCRYPTION=true`** — without it, valves land in the `functions` table in plaintext |
+| `ENABLE_VALVE_ENCRYPTION=true` (0.10.0+) | The pipe steps aside and lets OpenWebUI handle it — no double encryption. Keys encrypted before you flipped the flag stay readable |
+| No `WEBUI_SECRET_KEY`, or `cryptography` unavailable | Values pass through in plaintext. Nothing breaks |
+| Upgrading with a key already configured | Keeps working as-is. Plaintext values are read unchanged; no migration step |
+| `WEBUI_SECRET_KEY` changed after the key was stored | The pipe reports that the key could not be decrypted and asks you to re-enter it, instead of failing with a confusing `401` |
+
 ### Toggle filters & companion filter
 
 | Component | Purpose |
@@ -211,6 +223,8 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 ## 📝 Recent pipe changes
 ### `v0.9.25`
+- The Anthropic API key (admin valve and per-user override) is stored **encrypted** — Fernet, key derived from `WEBUI_SECRET_KEY`. OpenWebUI's own valve encryption is opt-in (`ENABLE_VALVE_ENCRYPTION`, default off), so on a default install this is what keeps the key out of the database in plaintext. Where that flag is on, the pipe defers to OpenWebUI instead of encrypting twice. Existing plaintext keys keep working, no migration needed
+- Debug logs start with the detected OpenWebUI version and no longer contain the API key in plaintext
 - Added `MODEL_CACHE_TTL_MINUTES` (default `1440`, `0` disables caching): controls how long the discovered model list is cached. The 24h TTL used to be hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
 - Fixed the model cache surviving a connection change — the cached list is fingerprinted against API key, base URL, workspace ID and `ENABLED_MODELS`. Repointing the pipe at a different endpoint used to keep serving the old endpoint's models for up to 24 hours
 - A failed model refresh no longer falls back to a cache fetched with different connection settings
@@ -386,6 +400,7 @@ You only need Python 3.11+ to build — the build and minify scripts use the sta
 | `helpers/build_anthropic_pipe.py` | Compiles the sources into the single-file artifact |
 | `helpers/minify_pipe.py` | Strips comments/docstrings for a smaller upload artifact |
 | `helpers/test_model_cache.py` | Self-check for model-list caching and invalidation (`python helpers/test_model_cache.py`) |
+| `helpers/test_valve_encryption.py` | Self-check for API key encryption at rest (`python helpers/test_valve_encryption.py`) |
 | `anthropic_pipe.py` | **Generated** single-file pipe (this is what you install) |
 | `anthropic_pipe.min.py` | **Generated** minified pipe (git-ignored) |
 | `anthropic_pipe_*_toggle.py`, `anthropic_manifold_companion_filter.py` | Standalone filters, edited directly |

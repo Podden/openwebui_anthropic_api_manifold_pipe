@@ -98,6 +98,11 @@ class PipeModelSupportMethods:
         The API key is hashed rather than stored so the signature can be logged
         safely. Any change here means the cached list came from a different
         endpoint or allow-list and must not be reused.
+
+        Uses the stored (possibly encrypted) key rather than decrypting it: the
+        stored value is stable between saves, and a spurious change would only
+        cost one extra model fetch -- decrypting here could raise on a rotated
+        WEBUI_SECRET_KEY and take the model list down with it.
         """
         parts = [
             (self.valves.ANTHROPIC_API_KEY or "").strip(),
@@ -228,6 +233,11 @@ class PipeModelSupportMethods:
         ``from anthropic import AsyncAnthropic`` shadows the module global and makes
         the class unpatchable, which silently sends every mocked test to the live API.
         """
+        # Single decryption point: every request path (model listing, tasks,
+        # file downloads, the main loop) builds its client here, and the key may
+        # arrive either from a valve or via the x-api-key header built in
+        # create_request_payload. Plaintext keys pass through untouched.
+        api_key = decrypt_valve_secret(api_key)
         base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
         # The SDK derives its own "X-Api-Key" from api_key and merges default_headers
         # with a case-sensitive dict merge, so a lowercase "x-api-key" here survives

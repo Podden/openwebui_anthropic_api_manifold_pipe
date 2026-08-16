@@ -65,6 +65,9 @@ class PipeOrchestratorMethods:
 
             # Debug: Log all Valves and UserValves settings
             if logger.isEnabledFor(logging.DEBUG):
+                # Environment first: most bug reports come down to an OpenWebUI
+                # version whose behaviour differs from the one under test.
+                logger.debug(f"OpenWebUI version: {OPENWEBUI_VERSION}")
                 logger.debug(f"Valves: {self.valves.model_dump()}")
                 user_valves = __user__.get("valves")
                 if user_valves and hasattr(user_valves, "model_dump"):
@@ -76,7 +79,11 @@ class PipeOrchestratorMethods:
             user_valves = __user__.get("valves")
             user_api_key = getattr(user_valves, "ANTHROPIC_API_KEY", "") if user_valves else ""
             api_key = user_api_key.strip() if user_api_key and user_api_key.strip() else self.valves.ANTHROPIC_API_KEY
-            if not api_key or api_key == "Your API Key Here":
+            # Compare against the plaintext: an encrypted valve never equals the
+            # placeholder, so an unconfigured pipe would otherwise sail past this
+            # check and fail later with a 401.
+            resolved_api_key = decrypt_valve_secret(api_key).strip()
+            if not resolved_api_key or resolved_api_key == "Your API Key Here":
                 error_msg = "Error: No API key configured. Set it in admin Valves or your personal UserValves."
                 logger.error(f"{error_msg}")
                 await status.complete("No API Key Set!")

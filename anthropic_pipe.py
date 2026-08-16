@@ -39,6 +39,8 @@ Supports:
 
 Changelog:
 v0.9.25
+- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install of any version the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working untouched -- there is no migration step, and without WEBUI_SECRET_KEY (or without the cryptography package) values simply pass through
+- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext (the valve dump shows the encrypted value)
 - Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching) to control how long the discovered model list is cached. Previously the 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
 - Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models for up to 24 hours
 - A failed model refresh no longer falls back to a cache that was fetched from different connection settings -- showing the wrong endpoint's models is worse than showing none
@@ -769,6 +771,156 @@ except ImportError:
     Models = None
     ModelForm = None
     MODELS_AVAILABLE = False
+
+# =============================================================================
+# SECRET VALVE ENCRYPTION
+# =============================================================================
+# OpenWebUI can encrypt valves at rest itself since 0.10.0, but only when
+# ENABLE_VALVE_ENCRYPTION is set -- it defaults to False (see
+# open_webui/env.py and open_webui/utils/valves.py). On a default install of any
+# version the API key therefore sits in the functions table in plaintext, which
+# is what this covers.
+#
+# The key derivation below matches OpenWebUI's own (_fernet in utils/valves.py)
+# on purpose, so both layers behave identically where they overlap. With their
+# flag on, the value ends up encrypted twice, which is harmless. Every step here
+# is a no-op for values that are not encrypted, so existing plaintext valves
+# keep working and nothing has to be migrated.
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+
+    VALVE_ENCRYPTION_AVAILABLE = True
+except ImportError:
+    Fernet = None
+    InvalidToken = Exception
+    VALVE_ENCRYPTION_AVAILABLE = False
+
+try:
+    from pydantic_core import core_schema
+
+    PYDANTIC_CORE_AVAILABLE = True
+except ImportError:
+    core_schema = None
+    PYDANTIC_CORE_AVAILABLE = False
+
+ENCRYPTED_VALVE_PREFIX = "encrypted:"
+
+try:
+    from open_webui.env import VERSION as OPENWEBUI_VERSION
+except Exception:
+    OPENWEBUI_VERSION = "unknown"
+
+# Whether OpenWebUI encrypts valves at rest itself. Checked instead of comparing
+# version numbers: the constant only exists from 0.10.0, and it reflects the
+# actual ENABLE_VALVE_ENCRYPTION setting rather than what the release could do.
+# Missing (older releases) or False means the key would land in the DB in
+# plaintext, so the pipe encrypts it itself.
+try:
+    from open_webui.env import ENABLE_VALVE_ENCRYPTION as OPENWEBUI_ENCRYPTS_VALVES
+except Exception:
+    OPENWEBUI_ENCRYPTS_VALVES = False
+
+
+def _valve_encryption_key() -> Optional[bytes]:
+    """Fernet key from WEBUI_SECRET_KEY, derived the same way OpenWebUI does it.
+
+    Returns None when encryption is unavailable or no secret is configured; the
+    callers then pass values through unchanged rather than failing.
+    """
+    if not VALVE_ENCRYPTION_AVAILABLE:
+        return None
+    secret = os.environ.get("WEBUI_SECRET_KEY", "").strip()
+    if not secret:
+        return None
+    # A 44-char secret may already be a valid Fernet key; use it directly.
+    if len(secret) == 44:
+        try:
+            Fernet(secret.encode())
+            return secret.encode()
+        except Exception:
+            pass
+    return base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+
+
+def encrypt_valve_secret(value: str) -> str:
+    """Encrypt a valve value. Idempotent, and a no-op without a secret key.
+
+    Skipped when OpenWebUI encrypts valves itself -- doing it twice with the
+    same cipher and the same key buys nothing and only adds a way to fail.
+
+    Idempotency is load-bearing: OpenWebUI re-validates the whole Valves model
+    every time an admin saves the valve page, so an already-encrypted value is
+    handed back in. Encrypting it again each save would nest the ciphertext.
+    """
+    if not value or value.startswith(ENCRYPTED_VALVE_PREFIX):
+        return value
+    if OPENWEBUI_ENCRYPTS_VALVES:
+        return value
+    key = _valve_encryption_key()
+    if not key:
+        return value
+    try:
+        return ENCRYPTED_VALVE_PREFIX + Fernet(key).encrypt(value.encode()).decode()
+    except Exception as e:
+        logger.warning(f"Could not encrypt valve value, storing as-is: {e}")
+        return value
+
+
+def decrypt_valve_secret(value: Any) -> str:
+    """Return the plaintext behind a valve value.
+
+    Values without the marker prefix are returned unchanged, which covers
+    plaintext valves from installs that predate this, defaults, and setups
+    without WEBUI_SECRET_KEY.
+
+    Deliberately not gated on OPENWEBUI_ENCRYPTS_VALVES: a key encrypted while
+    that flag was off must stay readable after an admin turns it on.
+    """
+    text = str(value or "")
+    if not text.startswith(ENCRYPTED_VALVE_PREFIX):
+        return text
+    token = text[len(ENCRYPTED_VALVE_PREFIX) :]
+    key = _valve_encryption_key()
+    if not key:
+        raise ValueError(
+            "Stored API key is encrypted but WEBUI_SECRET_KEY is not available. "
+            "Restore the original secret key, or re-enter the API key in the valves."
+        )
+    try:
+        return Fernet(key).decrypt(token.encode()).decode()
+    except InvalidToken as e:
+        raise ValueError(
+            "Stored API key could not be decrypted -- WEBUI_SECRET_KEY appears to "
+            "have changed. Re-enter the API key in the valves."
+        ) from e
+
+
+if PYDANTIC_CORE_AVAILABLE:
+
+    class EncryptedStr(str):
+        """Valve field type that keeps its value encrypted at rest.
+
+        OpenWebUI persists `Valves(**form_data).model_dump()`, so the value the
+        validator returns is what reaches the database.
+        """
+
+        @classmethod
+        def _validate(cls, value: Any) -> "EncryptedStr":
+            return cls(encrypt_valve_secret(str(value or "")))
+
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type, handler):
+            return core_schema.no_info_after_validator_function(
+                cls._validate, core_schema.str_schema()
+            )
+
+        def get_secret(self) -> str:
+            """Plaintext value. Raises ValueError if the secret key changed."""
+            return decrypt_valve_secret(self)
+
+else:  # pragma: no cover - pydantic v2 always ships pydantic_core
+    EncryptedStr = str
+
 
 # Import OpenWebUI builtin tools helper
 try:
@@ -3351,9 +3503,10 @@ class Pipe:
 
 
     class Valves(BaseModel):
-        ANTHROPIC_API_KEY: str = Field(
+        ANTHROPIC_API_KEY: EncryptedStr = Field(
             default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "Your API Key Here"),
-            description="Anthropic API key. Defaults to the ANTHROPIC_API_KEY environment variable when set.",
+            description="Anthropic API key. Defaults to the ANTHROPIC_API_KEY environment variable when set. "
+            "Stored encrypted when WEBUI_SECRET_KEY is set.",
         )
         ANTHROPIC_BASE_URL: str = Field(
             default="https://api.anthropic.com",
@@ -3525,9 +3678,10 @@ class Pipe:
         )
 
     class UserValves(BaseModel):
-        ANTHROPIC_API_KEY: str = Field(
+        ANTHROPIC_API_KEY: EncryptedStr = Field(
             default="",
-            description="Overrides the admin-configured API key.",
+            description="Overrides the admin-configured API key. "
+            "Stored encrypted when WEBUI_SECRET_KEY is set.",
         )
         ENABLE_THINKING: bool = Field(
             default=False,
@@ -7536,6 +7690,11 @@ class Pipe:
         The API key is hashed rather than stored so the signature can be logged
         safely. Any change here means the cached list came from a different
         endpoint or allow-list and must not be reused.
+
+        Uses the stored (possibly encrypted) key rather than decrypting it: the
+        stored value is stable between saves, and a spurious change would only
+        cost one extra model fetch -- decrypting here could raise on a rotated
+        WEBUI_SECRET_KEY and take the model list down with it.
         """
         parts = [
             (self.valves.ANTHROPIC_API_KEY or "").strip(),
@@ -7666,6 +7825,11 @@ class Pipe:
         ``from anthropic import AsyncAnthropic`` shadows the module global and makes
         the class unpatchable, which silently sends every mocked test to the live API.
         """
+        # Single decryption point: every request path (model listing, tasks,
+        # file downloads, the main loop) builds its client here, and the key may
+        # arrive either from a valve or via the x-api-key header built in
+        # create_request_payload. Plaintext keys pass through untouched.
+        api_key = decrypt_valve_secret(api_key)
         base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
         # The SDK derives its own "X-Api-Key" from api_key and merges default_headers
         # with a case-sensitive dict merge, so a lowercase "x-api-key" here survives
@@ -8632,6 +8796,9 @@ class Pipe:
 
             # Debug: Log all Valves and UserValves settings
             if logger.isEnabledFor(logging.DEBUG):
+                # Environment first: most bug reports come down to an OpenWebUI
+                # version whose behaviour differs from the one under test.
+                logger.debug(f"OpenWebUI version: {OPENWEBUI_VERSION}")
                 logger.debug(f"Valves: {self.valves.model_dump()}")
                 user_valves = __user__.get("valves")
                 if user_valves and hasattr(user_valves, "model_dump"):
@@ -8643,7 +8810,11 @@ class Pipe:
             user_valves = __user__.get("valves")
             user_api_key = getattr(user_valves, "ANTHROPIC_API_KEY", "") if user_valves else ""
             api_key = user_api_key.strip() if user_api_key and user_api_key.strip() else self.valves.ANTHROPIC_API_KEY
-            if not api_key or api_key == "Your API Key Here":
+            # Compare against the plaintext: an encrypted valve never equals the
+            # placeholder, so an unconfigured pipe would otherwise sail past this
+            # check and fail later with a 401.
+            resolved_api_key = decrypt_valve_secret(api_key).strip()
+            if not resolved_api_key or resolved_api_key == "Your API Key Here":
                 error_msg = "Error: No API key configured. Set it in admin Valves or your personal UserValves."
                 logger.error(f"{error_msg}")
                 await status.complete("No API Key Set!")

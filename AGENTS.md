@@ -16,6 +16,7 @@ This repo holds one OpenWebUI manifold pipe for the Anthropic Messages API plus 
 | Minify it for upload | `python helpers/minify_pipe.py anthropic_pipe.py -o anthropic_pipe.min.py --check` |
 | Pull the current artifact back into the template | `python helpers/build_anthropic_pipe.py --refresh-template` |
 | Check model-list caching and invalidation | `python helpers/test_model_cache.py` (fakes the Anthropic client, no network) |
+| Check API key encryption at rest | `python helpers/test_valve_encryption.py` (runs against the built artifact) |
 
 `--refresh-template` overwrites `src/anthropic_pipe/pipe_template.py` with the current artifact minus its generated sections. Use it only when the template drifted, never as a normal step.
 
@@ -68,6 +69,8 @@ Two module lists in `helpers/build_anthropic_pipe.py` are load-bearing:
 - Be careful with cache control around thinking blocks and programmatic tool-calling flows.
 - Do not send empty location values for Anthropic web-search configuration.
 - The model-list cache is class-level and must stay fingerprinted against the connection settings (`_model_cache_signature`). Adding a valve that changes which models an endpoint returns means adding it to that signature.
+- The API key valves use `EncryptedStr`, which encrypts on pydantic validation. OpenWebUI persists `Valves(**form_data).model_dump()`, so the validator's output is what reaches the DB — and it re-validates on every valve save, which is why `encrypt_valve_secret` must stay idempotent and why `""` must stay `""` (a non-empty per-user key is treated as "user set their own"). OpenWebUI's own valve encryption (0.10.0+) is opt-in via `ENABLE_VALVE_ENCRYPTION`, which defaults to **False** — so on a default install this is the only thing keeping the key out of the DB in plaintext. Encryption is skipped when that flag is on (detected by importing the constant, not by comparing versions); decryption is *never* gated on it, so a key encrypted before the flag was flipped stays readable. Key derivation deliberately mirrors `open_webui/utils/valves.py::_fernet`.
+- `_build_anthropic_client` is the single decryption point for the API key. New code paths must get their client from there rather than passing `valves.ANTHROPIC_API_KEY` to the SDK directly.
 - Task requests and sub-agent runs must return plain prose: no collapsibles, no replay carriers, no token footer, no metadata markers.
 
 ## Common failure patterns
