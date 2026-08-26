@@ -204,6 +204,30 @@ class PipeRequestMessagesMethods:
                     all_matches.append((m.start(), "hidden", m))
 
                 if all_matches:
+                    # Pre-scan the standalone *_tool_result carriers, keyed by
+                    # tool_use_id. The API requires a server_tool_use to be
+                    # followed directly by its result; the stored HTML does not
+                    # guarantee that order once several server tools run in
+                    # quick succession (their carriers interleave with text and
+                    # with each other), and replaying document order then 400s
+                    # the next request with "tool use found without a
+                    # corresponding tool_result block".
+                    standalone_results: dict[str, dict] = {}
+                    for _, kind, match in all_matches:
+                        if kind != "server_tool_result":
+                            continue
+                        attrs = dict(PATTERN_DATA_ATTR.findall(match.group(1)))
+                        payload_b64 = attrs.get("payload-b64", "")
+                        decoded = (
+                            self._decode_block_payload(payload_b64) if payload_b64 else None
+                        )
+                        if (
+                            isinstance(decoded, dict)
+                            and decoded.get("type", "").endswith("_tool_result")
+                            and decoded.get("tool_use_id")
+                        ):
+                            standalone_results[decoded["tool_use_id"]] = decoded
+                    consumed_results: set[str] = set()
                     all_matches.sort(key=lambda t: t[0])
                     blocks: list[dict] = []
                     last_end = 0
@@ -244,13 +268,29 @@ class PipeRequestMessagesMethods:
                                 # and data-result-payload-b64 carries the encoded payload. The decoded
                                 # payload already has "type": "...", so result_kind is just sanity-check.
                                 result_b64 = attrs.get("result-payload-b64", "")
-                                if result_b64:
-                                    result_decoded = self._decode_block_payload(result_b64)
-                                    if (
-                                        isinstance(result_decoded, dict)
-                                        and result_decoded.get("type", "").endswith("_tool_result")
-                                    ):
-                                        blocks.append(result_decoded)
+                                result_decoded = (
+                                    self._decode_block_payload(result_b64) if result_b64 else None
+                                )
+                                if (
+                                    isinstance(result_decoded, dict)
+                                    and result_decoded.get("type", "").endswith("_tool_result")
+                                ):
+                                    blocks.append(result_decoded)
+                                    if result_decoded.get("tool_use_id"):
+                                        consumed_results.add(result_decoded["tool_use_id"])
+                                else:
+                                    # No embedded result — pull the standalone
+                                    # carrier forward so the pair stays adjacent.
+                                    tool_use_id = decoded.get("id", "")
+                                    if tool_use_id in standalone_results:
+                                        blocks.append(standalone_results[tool_use_id])
+                                        consumed_results.add(tool_use_id)
+                                    else:
+                                        logger.warning(
+                                            "server_tool_use id=%r has no result carrier; "
+                                            "replaying it unpaired will 400 the request",
+                                            tool_use_id,
+                                        )
                             # else: legacy/missing payload → drop
                         elif kind == "server_tool_result":
                             attrs_str = match.group(1)
@@ -258,7 +298,10 @@ class PipeRequestMessagesMethods:
                             payload_b64 = attrs.get("payload-b64", "")
                             decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
                             if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
-                                blocks.append(decoded)
+                                # Skip what was already pulled forward next to
+                                # its server_tool_use above.
+                                if decoded.get("tool_use_id") not in consumed_results:
+                                    blocks.append(decoded)
                             # else: legacy/missing payload → drop
                         elif kind == "hidden":
                             # One carrier may hold several blocks (a merged

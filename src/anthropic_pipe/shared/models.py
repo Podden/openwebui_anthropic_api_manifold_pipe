@@ -142,7 +142,9 @@ class PipeModelSupportMethods:
         if cache_valid:
             models = []
             for name, info in self._api_capabilities_cache.items():
-                models.append(self._build_openwebui_model_entry(name, info))
+                models.append(self._build_openwebui_model_entry(
+                        name, info, info.get("_display_name", "")
+                    ))
             return models
 
         from anthropic import AsyncAnthropic
@@ -189,7 +191,9 @@ class PipeModelSupportMethods:
             ):
                 logging.info("Using stale capability cache as fallback")
                 for name, info in self._api_capabilities_cache.items():
-                    models.append(self._build_openwebui_model_entry(name, info))
+                    models.append(self._build_openwebui_model_entry(
+                        name, info, info.get("_display_name", "")
+                    ))
                 return models
             # No cache available — return empty (API key likely invalid)
             return models

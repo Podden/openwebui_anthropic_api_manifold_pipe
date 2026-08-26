@@ -274,7 +274,7 @@ class PipeStreamRuntimeSupportMethods:
                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                     if _explanation:
                         _ref_msg += f"\n\n_{_explanation}_"
-                    await request_ctx.emit_delta(_ref_msg)
+                    await request_ctx.emit_block(_ref_msg)
         elif not sdk_content:
             logger.warning(
                 f"⚠️ Empty API response (no stop_reason, no content). "

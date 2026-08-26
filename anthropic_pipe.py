@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.26
+version: 0.9.27
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.27
+- Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
+- Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
+- Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)
+- Fixed an empty SKILLS valve triggering the code_execution notification: OpenWebUI stores an empty array valve as "", which round-trips back as [""], and that is truthy. Blank entries are now dropped (#48, reported by @clang13)
+
 v0.9.26
 - Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
 - Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
@@ -63,7 +69,7 @@ v0.9.24
 - Bumped the required Anthropic SDK to 0.121.0
 
 v0.9.23
-- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode
+- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode (#45, by @AliD101v)
 - Thinking Toggle now works on thinking-on-by-default models (Opus 5 / Sonnet 5): turning it off sends thinking:{"type":"disabled"} instead of just omitting the field, and clamps effort to 'high' because Opus 5 rejects disabled thinking at xhigh/max
 - Added REFUSAL_FALLBACK valve: retry a safety-refused request server-side, either on Anthropic's per-category recommendation ('default') or on a pinned model
 - Removed Fast Mode for Opus 4.7 (2026-07-24): speed:"fast" now errors there instead of falling back to standard speed
@@ -1391,7 +1397,11 @@ async def create_request_payload(
     # Track if Files API uploaded any files (for auto-enabling code execution)
     has_files_api_uploads = False
     user_valves_for_features = __user__["valves"]
-    requested_skills = list(getattr(user_valves_for_features, "SKILLS", []) or [])
+    requested_skills = [
+        s.strip()
+        for s in (getattr(user_valves_for_features, "SKILLS", []) or [])
+        if s and s.strip()
+    ]
     use_files_api = bool(getattr(user_valves_for_features, "USE_FILES_API", False)) or bool(
         __metadata__.get("enforce_files_api")
     )
@@ -2951,7 +2961,7 @@ async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
     if getattr(result_block, "type", "") == "bash_code_execution_tool_result_error":
         error_code = getattr(result_block, "error_code", "unknown")
         logger.warning("bash_code_execution error: %s", error_code)
-        await ctx.emit_delta(f"⚠️ Code execution error: {error_code}")
+        await ctx.emit_block(f"⚠️ Code execution error: {error_code}")
         server_tool.last_code_content = ""
         return
 
@@ -3001,7 +3011,7 @@ async def _handle_text_editor_result(content_block: Any, ctx: Any) -> None:
     if result_type == "text_editor_code_execution_tool_result_error":
         error_code = getattr(result_block, "error_code", "unknown")
         logger.warning("text_editor_code_execution error: %s", error_code)
-        await ctx.emit_delta(f"⚠️ Text editor error: {error_code}")
+        await ctx.emit_block(f"⚠️ Text editor error: {error_code}")
         server_tool.last_code_content = ""
         return
 
@@ -3059,7 +3069,7 @@ async def _handle_generic_code_result(content_block: Any, ctx: Any) -> None:
                 else getattr(result_block, "error_code", "unknown")
             )
             logger.warning("code_execution error: %s", error_code)
-            await ctx.emit_delta(f"⚠️ Code execution error: {error_code}")
+            await ctx.emit_block(f"⚠️ Code execution error: {error_code}")
             server_tool.last_code_content = ""
             server_tool.in_code_execution = False
             server_tool.is_web_filtering = False
@@ -4889,6 +4899,30 @@ class Pipe:
                     all_matches.append((m.start(), "hidden", m))
 
                 if all_matches:
+                    # Pre-scan the standalone *_tool_result carriers, keyed by
+                    # tool_use_id. The API requires a server_tool_use to be
+                    # followed directly by its result; the stored HTML does not
+                    # guarantee that order once several server tools run in
+                    # quick succession (their carriers interleave with text and
+                    # with each other), and replaying document order then 400s
+                    # the next request with "tool use found without a
+                    # corresponding tool_result block".
+                    standalone_results: dict[str, dict] = {}
+                    for _, kind, match in all_matches:
+                        if kind != "server_tool_result":
+                            continue
+                        attrs = dict(PATTERN_DATA_ATTR.findall(match.group(1)))
+                        payload_b64 = attrs.get("payload-b64", "")
+                        decoded = (
+                            self._decode_block_payload(payload_b64) if payload_b64 else None
+                        )
+                        if (
+                            isinstance(decoded, dict)
+                            and decoded.get("type", "").endswith("_tool_result")
+                            and decoded.get("tool_use_id")
+                        ):
+                            standalone_results[decoded["tool_use_id"]] = decoded
+                    consumed_results: set[str] = set()
                     all_matches.sort(key=lambda t: t[0])
                     blocks: list[dict] = []
                     last_end = 0
@@ -4929,13 +4963,29 @@ class Pipe:
                                 # and data-result-payload-b64 carries the encoded payload. The decoded
                                 # payload already has "type": "...", so result_kind is just sanity-check.
                                 result_b64 = attrs.get("result-payload-b64", "")
-                                if result_b64:
-                                    result_decoded = self._decode_block_payload(result_b64)
-                                    if (
-                                        isinstance(result_decoded, dict)
-                                        and result_decoded.get("type", "").endswith("_tool_result")
-                                    ):
-                                        blocks.append(result_decoded)
+                                result_decoded = (
+                                    self._decode_block_payload(result_b64) if result_b64 else None
+                                )
+                                if (
+                                    isinstance(result_decoded, dict)
+                                    and result_decoded.get("type", "").endswith("_tool_result")
+                                ):
+                                    blocks.append(result_decoded)
+                                    if result_decoded.get("tool_use_id"):
+                                        consumed_results.add(result_decoded["tool_use_id"])
+                                else:
+                                    # No embedded result — pull the standalone
+                                    # carrier forward so the pair stays adjacent.
+                                    tool_use_id = decoded.get("id", "")
+                                    if tool_use_id in standalone_results:
+                                        blocks.append(standalone_results[tool_use_id])
+                                        consumed_results.add(tool_use_id)
+                                    else:
+                                        logger.warning(
+                                            "server_tool_use id=%r has no result carrier; "
+                                            "replaying it unpaired will 400 the request",
+                                            tool_use_id,
+                                        )
                             # else: legacy/missing payload → drop
                         elif kind == "server_tool_result":
                             attrs_str = match.group(1)
@@ -4943,7 +4993,10 @@ class Pipe:
                             payload_b64 = attrs.get("payload-b64", "")
                             decoded = self._decode_block_payload(payload_b64) if payload_b64 else None
                             if isinstance(decoded, dict) and decoded.get("type", "").endswith("_tool_result"):
-                                blocks.append(decoded)
+                                # Skip what was already pulled forward next to
+                                # its server_tool_use above.
+                                if decoded.get("tool_use_id") not in consumed_results:
+                                    blocks.append(decoded)
                             # else: legacy/missing payload → drop
                         elif kind == "hidden":
                             # One carrier may hold several blocks (a merged
@@ -8031,7 +8084,9 @@ class Pipe:
         if cache_valid:
             models = []
             for name, info in self._api_capabilities_cache.items():
-                models.append(self._build_openwebui_model_entry(name, info))
+                models.append(self._build_openwebui_model_entry(
+                        name, info, info.get("_display_name", "")
+                    ))
             return models
 
         from anthropic import AsyncAnthropic
@@ -8078,7 +8133,9 @@ class Pipe:
             ):
                 logging.info("Using stale capability cache as fallback")
                 for name, info in self._api_capabilities_cache.items():
-                    models.append(self._build_openwebui_model_entry(name, info))
+                    models.append(self._build_openwebui_model_entry(
+                        name, info, info.get("_display_name", "")
+                    ))
                 return models
             # No cache available — return empty (API key likely invalid)
             return models
@@ -8752,7 +8809,7 @@ class Pipe:
                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                     if _explanation:
                         _ref_msg += f"\n\n_{_explanation}_"
-                    await request_ctx.emit_delta(_ref_msg)
+                    await request_ctx.emit_block(_ref_msg)
         elif not sdk_content:
             logger.warning(
                 f"⚠️ Empty API response (no stop_reason, no content). "

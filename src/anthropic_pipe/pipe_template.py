@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.26
+version: 0.9.27
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.27
+- Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
+- Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
+- Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)
+- Fixed an empty SKILLS valve triggering the code_execution notification: OpenWebUI stores an empty array valve as "", which round-trips back as [""], and that is truthy. Blank entries are now dropped (#48, reported by @clang13)
+
 v0.9.26
 - Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
 - Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
@@ -63,7 +69,7 @@ v0.9.24
 - Bumped the required Anthropic SDK to 0.121.0
 
 v0.9.23
-- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode
+- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode (#45, by @AliD101v)
 - Thinking Toggle now works on thinking-on-by-default models (Opus 5 / Sonnet 5): turning it off sends thinking:{"type":"disabled"} instead of just omitting the field, and clamps effort to 'high' because Opus 5 rejects disabled thinking at xhigh/max
 - Added REFUSAL_FALLBACK valve: retry a safety-refused request server-side, either on Anthropic's per-category recommendation ('default') or on a pinned model
 - Removed Fast Mode for Opus 4.7 (2026-07-24): speed:"fast" now errors there instead of falling back to standard speed

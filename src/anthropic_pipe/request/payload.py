@@ -186,7 +186,11 @@ async def create_request_payload(
     # Track if Files API uploaded any files (for auto-enabling code execution)
     has_files_api_uploads = False
     user_valves_for_features = __user__["valves"]
-    requested_skills = list(getattr(user_valves_for_features, "SKILLS", []) or [])
+    requested_skills = [
+        s.strip()
+        for s in (getattr(user_valves_for_features, "SKILLS", []) or [])
+        if s and s.strip()
+    ]
     use_files_api = bool(getattr(user_valves_for_features, "USE_FILES_API", False)) or bool(
         __metadata__.get("enforce_files_api")
     )

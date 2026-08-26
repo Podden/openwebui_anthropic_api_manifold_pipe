@@ -59,7 +59,7 @@ async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
     if getattr(result_block, "type", "") == "bash_code_execution_tool_result_error":
         error_code = getattr(result_block, "error_code", "unknown")
         logger.warning("bash_code_execution error: %s", error_code)
-        await ctx.emit_delta(f"⚠️ Code execution error: {error_code}")
+        await ctx.emit_block(f"⚠️ Code execution error: {error_code}")
         server_tool.last_code_content = ""
         return
 
@@ -110,7 +110,7 @@ async def _handle_text_editor_result(content_block: Any, ctx: Any) -> None:
     if result_type == "text_editor_code_execution_tool_result_error":
         error_code = getattr(result_block, "error_code", "unknown")
         logger.warning("text_editor_code_execution error: %s", error_code)
-        await ctx.emit_delta(f"⚠️ Text editor error: {error_code}")
+        await ctx.emit_block(f"⚠️ Text editor error: {error_code}")
         server_tool.last_code_content = ""
         return
 
@@ -169,7 +169,7 @@ async def _handle_generic_code_result(content_block: Any, ctx: Any) -> None:
                 else getattr(result_block, "error_code", "unknown")
             )
             logger.warning("code_execution error: %s", error_code)
-            await ctx.emit_delta(f"⚠️ Code execution error: {error_code}")
+            await ctx.emit_block(f"⚠️ Code execution error: {error_code}")
             server_tool.last_code_content = ""
             server_tool.in_code_execution = False
             server_tool.is_web_filtering = False
