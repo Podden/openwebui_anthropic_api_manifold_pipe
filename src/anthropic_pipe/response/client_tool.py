@@ -9,6 +9,46 @@ from typing import Any, Awaitable, Callable
 logger = logging.getLogger(__name__)
 
 
+def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
+    """Drop arguments the tool's own schema does not declare.
+
+    Mirrors what OpenWebUI does before invoking a tool in its native
+    function-calling loop (``utils/middleware.py``: it intersects the call's
+    parameters with ``spec.parameters.properties``). Without it a single
+    undeclared key makes the callable raise ``TypeError: got an unexpected
+    keyword argument`` and the tool fails outright.
+
+    This is not theoretical: for a tool whose schema declares no properties at
+    all, the API has been observed streaming ``{"params": "{}"}`` as the tool
+    input (seen in ``input_json_delta`` chunks, so it is what the model
+    produced, not something added on our side). OpenWebUI's own loop shrugs
+    that off; ours has to as well.
+
+    A tool with no declared properties still gets an empty dict rather than
+    being left alone — that is exactly the case the stray key shows up in.
+    """
+    if not isinstance(args, dict) or not args:
+        return args if isinstance(args, dict) else {}
+    spec = (tool_entry or {}).get("spec") if isinstance(tool_entry, dict) else None
+    if not isinstance(spec, dict):
+        return args
+    params = spec.get("parameters")
+    if not isinstance(params, dict) or not isinstance(params.get("properties"), dict):
+        # No usable schema — passing the args through unchanged is the safer
+        # guess than dropping everything.
+        return args
+    allowed = params["properties"].keys()
+    kept = {k: v for k, v in args.items() if k in allowed}
+    dropped = [k for k in args if k not in allowed]
+    if dropped:
+        logger.warning(
+            "Tool '%s': dropped undeclared argument(s) %s not in its schema",
+            spec.get("name", "?"),
+            dropped,
+        )
+    return kept
+
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     """Handle a ``tool_use`` content_block_start; emits an in-progress tool-call block to OpenWebUI (unless inside code execution)."""
     tool_use = ctx.state.tool_use
@@ -157,7 +197,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 len(running_tool_tasks),
             )
         elif tool and tool.get("callable"):
-            args = tool_input if isinstance(tool_input, dict) else {}
+            args = _filter_tool_args(tool, tool_input if isinstance(tool_input, dict) else {})
             task = asyncio.create_task(
                 pipe._await_tool_task_result(tool_call_data, tool["callable"](**args))
             )
@@ -168,7 +208,9 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 len(running_tool_tasks),
             )
         elif tool_name in builtin_tools and builtin_tools[tool_name].get("callable"):
-            args = tool_input if isinstance(tool_input, dict) else {}
+            args = _filter_tool_args(
+                builtin_tools[tool_name], tool_input if isinstance(tool_input, dict) else {}
+            )
             task = asyncio.create_task(
                 pipe._await_tool_task_result(
                     tool_call_data,

@@ -293,6 +293,48 @@ async def create_request_payload(
                 processed_messages, native_pdf_filenames
             )
 
+    # Full-context uploads that neither the Files API nor native PDF upload
+    # claimed (EPUB, DOCX, TXT, MD — and PDFs too when native upload is off).
+    # OpenWebUI merges them into its <context> RAG template on the last user
+    # message, where the cache-control pass must treat them as volatile and the
+    # breakpoint lands in front of them: the whole file is re-sent uncached on
+    # every turn. Anchor them like PDFs instead and cut them out of the
+    # template, so the existing breakpoint covers them.
+    if not has_files_api_uploads:
+        (
+            full_ctx_blocks_by_user_msg,
+            full_ctx_markers,
+            full_ctx_filenames,
+        ) = await pipe._get_full_context_texts(
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+            exclude_pdfs=bool(__user__["valves"].USE_PDF_NATIVE_UPLOAD),
+        )
+        if full_ctx_blocks_by_user_msg:
+            user_msg_num = 0
+            for msg in processed_messages:
+                if msg["role"] == "user":
+                    if user_msg_num in full_ctx_blocks_by_user_msg:
+                        if isinstance(msg["content"], str):
+                            msg["content"] = [
+                                {"type": "text", "text": msg["content"]}
+                            ]
+                        msg["content"] = (
+                            full_ctx_blocks_by_user_msg[user_msg_num]
+                            + msg["content"]
+                        )
+                    user_msg_num += 1
+            new_marker_metadata.extend(full_ctx_markers)
+        if full_ctx_filenames:
+            logger.debug(
+                f"📋 RAG: Removing {len(full_ctx_filenames)} full-context source(s) from RAG"
+            )
+            pipe._remove_specific_sources_from_rag_message(
+                processed_messages, full_ctx_filenames
+            )
+
     ## Tools Handling
     # Correct Order for Caching: Tools, System, Messages
     tools_list, api_tool_names = pipe._convert_tools_to_claude_format(

@@ -67,6 +67,204 @@ class PipeRequestFilesMethods:
             logger.error(f"Error reading PDF file {file_id}: {e}")
             return None
 
+    @staticmethod
+    def _collect_file_ids(value: Any) -> List[str]:
+        """Recursively collect file/id-like identifiers from a nested dict/list structure."""
+        ids: List[str] = []
+        if isinstance(value, dict):
+            for key in ("id", "file_id"):
+                file_id_value = value.get(key)
+                if isinstance(file_id_value, str) and file_id_value:
+                    ids.append(file_id_value)
+            for key in ("file", "meta", "metadata"):
+                nested = value.get(key)
+                if nested is not None:
+                    ids.extend(Pipe._collect_file_ids(nested))
+        elif isinstance(value, list):
+            for item in value:
+                ids.extend(Pipe._collect_file_ids(item))
+        return ids
+
+    @classmethod
+    def _resolve_full_context_anchors(
+        cls,
+        marker_kind: str,
+        accept,
+        __files__: Optional[List[Dict[str, Any]]],
+        previous_marker_metadata: List[str],
+        processed_messages: List[Dict[str, Any]],
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[Dict[str, int], Dict[str, str]]:
+        """Decide which user message each full-context file belongs to.
+
+        Shared by the native-PDF path and the plain-text path: both must pin a
+        file to the message it was attached to, because a block that moves to
+        the newest message every turn rewrites the cache prefix every turn.
+
+        Anchor priority per file:
+          1) a marker persisted by an earlier pipe turn,
+          2) ownership in OpenWebUI's raw ``message.files``,
+          3) the latest user message, for genuinely new uploads.
+
+        Files known only from prior markers are re-included, because OpenWebUI
+        does not reliably re-send full-context files in ``__files__`` on
+        follow-up turns; dropping them would make the block vanish mid-history.
+
+        ``accept`` filters by filename (PDF vs. everything else). Returns
+        ``(file_id -> anchor_msg_idx, file_id -> filename)``, both ordered by
+        (anchor, file_id) so the rendered block order cannot drift between turns
+        just because the underlying dicts were populated from different sources.
+        """
+        prior_msg_idx: Dict[str, int] = {}
+        prior_filename: Dict[str, str] = {}
+        for entry in previous_marker_metadata or []:
+            parts = entry.split(":", 2)
+            if len(parts) < 3 or parts[1] != marker_kind:
+                continue
+            try:
+                msg_idx = int(parts[0])
+            except ValueError:
+                continue
+            decoded = unquote(parts[2])
+            file_id_part, _, fname_part = decoded.partition(":")
+            if file_id_part:
+                prior_msg_idx[file_id_part] = msg_idx
+                if fname_part:
+                    prior_filename[file_id_part] = fname_part
+
+        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
+        latest_user_msg_idx = max(0, user_msg_count - 1)
+
+        raw_file_msg_idx: Dict[str, int] = {}
+        if raw_messages:
+            raw_user_msg_idx = -1
+            for raw_msg in raw_messages:
+                if not isinstance(raw_msg, dict) or raw_msg.get("role") != "user":
+                    continue
+                raw_user_msg_idx += 1
+                for file_id in cls._collect_file_ids(raw_msg.get("files")):
+                    raw_file_msg_idx.setdefault(file_id, raw_user_msg_idx)
+
+        anchor: Dict[str, int] = {}
+        filename: Dict[str, str] = {}
+
+        for file in __files__ or []:
+            if file.get("type") != "file" or file.get("context") != "full":
+                continue
+            file_id = file.get("id")
+            if not file_id:
+                continue
+            file_name = file.get("name", "")
+            if not accept(file_name):
+                continue
+            anchor[file_id] = prior_msg_idx.get(
+                file_id, raw_file_msg_idx.get(file_id, latest_user_msg_idx)
+            )
+            filename[file_id] = file_name
+
+        for file_id, msg_idx in prior_msg_idx.items():
+            if file_id in anchor:
+                continue
+            anchor[file_id] = msg_idx
+            if file_id in prior_filename:
+                filename[file_id] = prior_filename[file_id]
+
+        ordered = sorted(anchor.items(), key=lambda kv: (kv[1], kv[0]))
+        return (
+            {fid: idx for fid, idx in ordered},
+            {fid: filename[fid] for fid, _ in ordered if fid in filename},
+        )
+
+    async def _get_file_text_from_file_id(self, file_id: str) -> Optional[str]:
+        """Return the plain text OpenWebUI extracted for a file, or None.
+
+        This is the same content OpenWebUI itself injects into its ``<context>``
+        template for a full-context file, so reading it here changes what the
+        model sees only in position, not in substance -- and it keeps working on
+        later turns, when the file is gone from ``__files__``.
+        """
+        if not FILES_AVAILABLE:
+            return None
+        try:
+            file = await Files.get_file_by_id(file_id)
+        except Exception as e:
+            logger.warning(f"Full-context text: could not load file {file_id}: {e}")
+            return None
+        if not file:
+            return None
+        data = getattr(file, "data", None)
+        content = data.get("content") if isinstance(data, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        return None
+
+    async def _get_full_context_texts(
+        self,
+        __files__: Optional[List[Dict[str, Any]]],
+        previous_marker_metadata: List[str],
+        processed_messages: List[Dict[str, Any]],
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+        exclude_pdfs: bool = True,
+    ) -> tuple[Dict[int, List[Dict[str, Any]]], List[str], List[str]]:
+        """Turn non-native full-context uploads into anchored, cacheable text blocks.
+
+        A file uploaded with Full Context arrives inside OpenWebUI's
+        ``### Task: ... <context><source>...`` template, merged into the last
+        user message. The cache-control pass has to treat that template as
+        volatile -- for retrieved RAG chunks it genuinely is, they are re-ranked
+        against every new question -- so the breakpoint lands *before* it and the
+        file is re-sent uncached on every single turn. For a 2 MB EPUB that is
+        the whole book, every turn.
+
+        A full-context file is not volatile, though: it is the entire file, the
+        same bytes each turn. So it gets the same treatment PDFs already get --
+        anchored to the user message it was attached to, placed ahead of the
+        prose, and cut out of the RAG template by the caller. From there the
+        existing breakpoint covers it and the book is written to cache once.
+
+        Returns ``(anchor_msg_idx -> blocks, markers, filenames)``; the filenames
+        are what the caller must strip from the RAG template.
+        """
+        blocks_by_user_msg: Dict[int, List[Dict[str, Any]]] = {}
+        markers: List[str] = []
+        filenames: List[str] = []
+
+        if not FILES_AVAILABLE:
+            return blocks_by_user_msg, markers, filenames
+
+        anchors, names = self._resolve_full_context_anchors(
+            "fctx",
+            lambda name: not (exclude_pdfs and name.lower().endswith(".pdf")),
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+        )
+
+        for file_id, anchor_msg_idx in anchors.items():
+            content = await self._get_file_text_from_file_id(file_id)
+            if not content:
+                continue
+            title = names.get(file_id) or file_id
+            blocks_by_user_msg.setdefault(anchor_msg_idx, []).append(
+                {
+                    "type": "text",
+                    "text": f'<source name="{title}">\n{content}\n</source>',
+                }
+            )
+            filenames.append(title)
+            markers.append(
+                self._create_metadata_marker(
+                    "fctx", f"{file_id}:{title}", messagenum=anchor_msg_idx
+                )
+            )
+
+        if filenames:
+            logger.debug(
+                f"📎 Full-context text: anchored {len(filenames)} file(s) as cacheable blocks"
+            )
+        return blocks_by_user_msg, markers, filenames
+
     async def _get_full_context_pdfs(
         self,
         __files__: Optional[List[Dict[str, Any]]],
@@ -107,104 +305,14 @@ class PipeRequestFilesMethods:
         if not FILES_AVAILABLE:
             return blocks_by_user_msg, markers
 
-        # Build a lookup of (file_id → msg_idx) for PDFs already anchored on
-        # previous turns. Marker payload for "pdf" is "file_id:filename".
-        prior_pdf_msg_idx: Dict[str, int] = {}
-        prior_pdf_filename: Dict[str, str] = {}
-        for entry in previous_marker_metadata:
-            parts = entry.split(":", 2)
-            if len(parts) < 3 or parts[1] != "pdf":
-                continue
-            try:
-                msg_idx = int(parts[0])
-            except ValueError:
-                continue
-            decoded = unquote(parts[2])
-            file_id_part, _, fname_part = decoded.partition(":")
-            if file_id_part:
-                prior_pdf_msg_idx[file_id_part] = msg_idx
-                if fname_part:
-                    prior_pdf_filename[file_id_part] = fname_part
-
-        # Index of the latest user-message — anchor for newly attached PDFs.
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
-
-        def _collect_file_ids(value: Any) -> List[str]:
-            """Recursively collect file/id-like identifiers from a nested dict/list structure."""
-            ids: List[str] = []
-            if isinstance(value, dict):
-                for key in ("id", "file_id"):
-                    file_id_value = value.get(key)
-                    if isinstance(file_id_value, str) and file_id_value:
-                        ids.append(file_id_value)
-                for key in ("file", "meta", "metadata"):
-                    nested = value.get(key)
-                    if nested is not None:
-                        ids.extend(_collect_file_ids(nested))
-            elif isinstance(value, list):
-                for item in value:
-                    ids.extend(_collect_file_ids(item))
-            return ids
-
-        # OpenWebUI may include all historical chat files in __files__ on every
-        # turn. Preserve cache stability by anchoring each file to the user
-        # message that owns it in the raw chat history, not to the latest query.
-        raw_file_msg_idx: Dict[str, int] = {}
-        if raw_messages:
-            raw_user_msg_idx = -1
-            for raw_msg in raw_messages:
-                if not isinstance(raw_msg, dict) or raw_msg.get("role") != "user":
-                    continue
-                raw_user_msg_idx += 1
-                for file_id in _collect_file_ids(raw_msg.get("files")):
-                    raw_file_msg_idx.setdefault(file_id, raw_user_msg_idx)
-
-        # Collect every PDF that needs a native document block this turn, keyed
-        # by file_id → (anchor_msg_idx). Two sources are merged:
-        #   1) the current turn's __files__ (authoritative for new uploads and
-        #      filenames), and
-        #   2) PDFs anchored on previous turns via persisted markers.
-        # OpenWebUI does NOT reliably re-send historical full-context files in
-        # __files__ on follow-up turns. Without (2) the native document block
-        # silently vanishes from the cache prefix on every later turn, which
-        # both hides the PDF from the model and forces a full cache rebuild.
-        pdf_anchor: Dict[str, int] = {}
-        pdf_filename: Dict[str, str] = {}
-
-        for file in __files__ or []:
-            # Only process files with 'full' context (not RAG chunks)
-            if file.get("type") != "file" or file.get("context") != "full":
-                continue
-
-            file_id = file.get("id")
-            if not file_id:
-                continue
-
-            # PDF only — non-PDF native uploads aren't supported here
-            file_name = file.get("name", "")
-            if not file_name.lower().endswith(".pdf"):
-                continue
-
-            # Decide which user message this PDF anchors to. Priority:
-            # 1) persisted marker from earlier pipe turns,
-            # 2) OpenWebUI raw message.files ownership,
-            # 3) latest user message for genuinely new files when no ownership
-            #    metadata is available.
-            pdf_anchor[file_id] = prior_pdf_msg_idx.get(
-                file_id, raw_file_msg_idx.get(file_id, latest_user_msg_idx)
-            )
-            pdf_filename[file_id] = file_name
-
-        # Re-inject PDFs known only from prior-turn markers (OpenWebUI dropped
-        # them from __files__ this turn). Keep their original anchor index so
-        # the byte-prefix stays identical across turns.
-        for file_id, msg_idx in prior_pdf_msg_idx.items():
-            if file_id in pdf_anchor:
-                continue
-            pdf_anchor[file_id] = msg_idx
-            if file_id in prior_pdf_filename:
-                pdf_filename[file_id] = prior_pdf_filename[file_id]
+        pdf_anchor, pdf_filename = self._resolve_full_context_anchors(
+            "pdf",
+            lambda name: name.lower().endswith(".pdf"),
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+        )
 
         for file_id, anchor_msg_idx in pdf_anchor.items():
             # Re-load base64 every turn (Anthropic native PDF blocks have no

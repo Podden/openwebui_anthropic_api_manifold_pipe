@@ -561,7 +561,7 @@ class PipeCacheControlMethods:
                         content = msg.get("content", [])
                         if content:
                             # tool_result blocks are cacheable
-                            content[-1]["cache_control"] = cache_marker
+                            content[-1]["cache_control"] = self._cache_control_marker()
                         break
         else:
             # Initial request: cache the last stable user message

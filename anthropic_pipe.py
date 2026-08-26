@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.25
+version: 0.9.26
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,12 +38,20 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.26
+- Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
+- Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
+- HIDE_BLOCKS is now a multiselect instead of a comma-separated string; existing string values still load
+- Fixed HIDE_BLOCKS never hiding code execution: the collapsible ignored the valve, and the bash / text editor variants were not recognised as the same block
+- Fixed total_tokens double-counting cache traffic; now input + output, matching OpenWebUI's usage contract, with cache reads and writes in their own two fields
+- Added ask_user (OpenWebUI 0.11.1) to the tool-search exclude list
+
 v0.9.25
-- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install of any version the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working untouched -- there is no migration step, and without WEBUI_SECRET_KEY (or without the cryptography package) values simply pass through
-- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext (the valve dump shows the encrypted value)
-- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching) to control how long the discovered model list is cached. Previously the 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
-- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models for up to 24 hours
-- A failed model refresh no longer falls back to a cache that was fetched from different connection settings -- showing the wrong endpoint's models is worse than showing none
+- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working -- no migration step
+- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext
+- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching). The 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
+- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models
+- A failed model refresh no longer falls back to a cache that was fetched from different connection settings
 
 v0.9.24
 - Fixed the context-window reading OpenWebUI uses for auto-compaction: prompt_tokens/completion_tokens now carry the last call's full input (uncached + cache writes + cache reads) instead of being absent. input_tokens/output_tokens stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly, and compaction fired far too late or never
@@ -519,7 +527,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote
 from typing import Any, Callable, List, Union, Dict, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from anthropic import (
     APIStatusError,
     AsyncAnthropic,
@@ -709,6 +717,20 @@ HIDDEN_BLOCKS: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 # HIDDEN_BLOCKS: one Pipe object serves concurrent requests.
 SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "anthropic_pipe_slim_output", default=False
+)
+
+# Human-in-the-loop tool approval (OpenWebUI 0.11.1+). OpenWebUI enforces its own
+# approval gate inside `utils/middleware.py`, which only covers ITS tool loop --
+# a manifold that runs its own loop bypasses the gate entirely. We re-implement
+# it at the single point where a tool coroutine is actually awaited.
+#
+# Holds `(mode, event_call)` for the current request: `mode` is
+# `__metadata__["params"]["tool_approval_mode"]` ("full" = run freely, "ask" =
+# confirm each call), `event_call` is OpenWebUI's blocking `__event_call__`.
+# Same ContextVar reasoning as HIDDEN_BLOCKS: one Pipe object serves concurrent
+# requests, so this must not live on `self`.
+TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "anthropic_pipe_tool_approval", default=("full", None)
 )
 
 # Pattern to strip OpenWebUI <details type="code_interpreter"> blocks from conversation history.
@@ -1474,6 +1496,48 @@ async def create_request_payload(
             )
             pipe._remove_specific_sources_from_rag_message(
                 processed_messages, native_pdf_filenames
+            )
+
+    # Full-context uploads that neither the Files API nor native PDF upload
+    # claimed (EPUB, DOCX, TXT, MD — and PDFs too when native upload is off).
+    # OpenWebUI merges them into its <context> RAG template on the last user
+    # message, where the cache-control pass must treat them as volatile and the
+    # breakpoint lands in front of them: the whole file is re-sent uncached on
+    # every turn. Anchor them like PDFs instead and cut them out of the
+    # template, so the existing breakpoint covers them.
+    if not has_files_api_uploads:
+        (
+            full_ctx_blocks_by_user_msg,
+            full_ctx_markers,
+            full_ctx_filenames,
+        ) = await pipe._get_full_context_texts(
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+            exclude_pdfs=bool(__user__["valves"].USE_PDF_NATIVE_UPLOAD),
+        )
+        if full_ctx_blocks_by_user_msg:
+            user_msg_num = 0
+            for msg in processed_messages:
+                if msg["role"] == "user":
+                    if user_msg_num in full_ctx_blocks_by_user_msg:
+                        if isinstance(msg["content"], str):
+                            msg["content"] = [
+                                {"type": "text", "text": msg["content"]}
+                            ]
+                        msg["content"] = (
+                            full_ctx_blocks_by_user_msg[user_msg_num]
+                            + msg["content"]
+                        )
+                    user_msg_num += 1
+            new_marker_metadata.extend(full_ctx_markers)
+        if full_ctx_filenames:
+            logger.debug(
+                f"📋 RAG: Removing {len(full_ctx_filenames)} full-context source(s) from RAG"
+            )
+            pipe._remove_specific_sources_from_rag_message(
+                processed_messages, full_ctx_filenames
             )
 
     ## Tools Handling
@@ -2394,6 +2458,29 @@ async def handle_compaction_block_stop(ctx: Any) -> None:
 # END GENERATED SECTION: anthropic_pipe.response.compaction_block
 
 # BEGIN GENERATED SECTION: anthropic_pipe.response.client_tool
+def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
+    if not isinstance(args, dict) or not args:
+        return args if isinstance(args, dict) else {}
+    spec = (tool_entry or {}).get("spec") if isinstance(tool_entry, dict) else None
+    if not isinstance(spec, dict):
+        return args
+    params = spec.get("parameters")
+    if not isinstance(params, dict) or not isinstance(params.get("properties"), dict):
+        # No usable schema — passing the args through unchanged is the safer
+        # guess than dropping everything.
+        return args
+    allowed = params["properties"].keys()
+    kept = {k: v for k, v in args.items() if k in allowed}
+    dropped = [k for k in args if k not in allowed]
+    if dropped:
+        logger.warning(
+            "Tool '%s': dropped undeclared argument(s) %s not in its schema",
+            spec.get("name", "?"),
+            dropped,
+        )
+    return kept
+
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use = ctx.state.tool_use
     server_tool = ctx.state.server_tool
@@ -2539,7 +2626,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 len(running_tool_tasks),
             )
         elif tool and tool.get("callable"):
-            args = tool_input if isinstance(tool_input, dict) else {}
+            args = _filter_tool_args(tool, tool_input if isinstance(tool_input, dict) else {})
             task = asyncio.create_task(
                 pipe._await_tool_task_result(tool_call_data, tool["callable"](**args))
             )
@@ -2550,7 +2637,9 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 len(running_tool_tasks),
             )
         elif tool_name in builtin_tools and builtin_tools[tool_name].get("callable"):
-            args = tool_input if isinstance(tool_input, dict) else {}
+            args = _filter_tool_args(
+                builtin_tools[tool_name], tool_input if isinstance(tool_input, dict) else {}
+            )
             task = asyncio.create_task(
                 pipe._await_tool_task_result(
                     tool_call_data,
@@ -3705,17 +3794,42 @@ class Pipe:
             default=True,
             description="Upload PDFs as native base64 documents instead of RAG text extraction. Only applies to 'Use Full Document' mode.",
         )
-        HIDE_BLOCKS: str = Field(
-            default="",
+        HIDE_BLOCKS: List[str] = Field(
+            default=[],
+            json_schema_extra={
+                "input": {
+                    "type": "multiselect",
+                    "options": [
+                        "web_search",
+                        "web_fetch",
+                        "tool_search",
+                        "advisor",
+                        "code_execution",
+                        "compaction",
+                    ],
+                }
+            },
             description=(
-                "Comma-separated list of content block types to hide from your chat, "
-                "e.g. 'tool_search,compaction'. A hidden block's collapsible is not "
-                "rendered at all — its progress is reported by the status line instead. "
-                "The block is still replayed to the API, so hiding it does not change "
-                "the model's view of the conversation. Known values: web_search, "
-                "web_fetch, tool_search, advisor, code_execution, compaction."
+                "Content block types to hide from your chat. A hidden block's "
+                "collapsible is not rendered at all — its progress is reported by "
+                "the status line instead. The block is still replayed to the API, "
+                "so hiding it does not change the model's view of the conversation."
             ),
         )
+
+        @field_validator("HIDE_BLOCKS", mode="before")
+        @classmethod
+        def _coerce_hide_blocks(cls, v):
+            """Accept the pre-v0.9.25 comma-separated string form.
+
+            HIDE_BLOCKS used to be a `str`. Existing users have one stored, and
+            OpenWebUI validates the whole UserValves model on every save — so
+            without this, a saved `""` makes *every* valve update fail with a
+            400 until the user manually clears the field.
+            """
+            if isinstance(v, str):
+                return [part.strip() for part in v.split(",") if part.strip()]
+            return v
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
@@ -3781,7 +3895,7 @@ class Pipe:
             bash,
             str_replace_based_edit_tool,
             computer,
-             add_memory, calculate_timestamp, create_automation,
+             add_memory, ask_user, calculate_timestamp, create_automation,
             create_calendar_event, create_tasks, delegate_task,
             delete_automation, delete_calendar_event, delete_memory,
             edit_image, execute_code, fetch_url, generate_image,
@@ -4466,7 +4580,7 @@ class Pipe:
                         content = msg.get("content", [])
                         if content:
                             # tool_result blocks are cacheable
-                            content[-1]["cache_control"] = cache_marker
+                            content[-1]["cache_control"] = self._cache_control_marker()
                         break
         else:
             # Initial request: cache the last stable user message
@@ -5950,6 +6064,204 @@ class Pipe:
             logger.error(f"Error reading PDF file {file_id}: {e}")
             return None
 
+    @staticmethod
+    def _collect_file_ids(value: Any) -> List[str]:
+        """Recursively collect file/id-like identifiers from a nested dict/list structure."""
+        ids: List[str] = []
+        if isinstance(value, dict):
+            for key in ("id", "file_id"):
+                file_id_value = value.get(key)
+                if isinstance(file_id_value, str) and file_id_value:
+                    ids.append(file_id_value)
+            for key in ("file", "meta", "metadata"):
+                nested = value.get(key)
+                if nested is not None:
+                    ids.extend(Pipe._collect_file_ids(nested))
+        elif isinstance(value, list):
+            for item in value:
+                ids.extend(Pipe._collect_file_ids(item))
+        return ids
+
+    @classmethod
+    def _resolve_full_context_anchors(
+        cls,
+        marker_kind: str,
+        accept,
+        __files__: Optional[List[Dict[str, Any]]],
+        previous_marker_metadata: List[str],
+        processed_messages: List[Dict[str, Any]],
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> tuple[Dict[str, int], Dict[str, str]]:
+        """Decide which user message each full-context file belongs to.
+
+        Shared by the native-PDF path and the plain-text path: both must pin a
+        file to the message it was attached to, because a block that moves to
+        the newest message every turn rewrites the cache prefix every turn.
+
+        Anchor priority per file:
+          1) a marker persisted by an earlier pipe turn,
+          2) ownership in OpenWebUI's raw ``message.files``,
+          3) the latest user message, for genuinely new uploads.
+
+        Files known only from prior markers are re-included, because OpenWebUI
+        does not reliably re-send full-context files in ``__files__`` on
+        follow-up turns; dropping them would make the block vanish mid-history.
+
+        ``accept`` filters by filename (PDF vs. everything else). Returns
+        ``(file_id -> anchor_msg_idx, file_id -> filename)``, both ordered by
+        (anchor, file_id) so the rendered block order cannot drift between turns
+        just because the underlying dicts were populated from different sources.
+        """
+        prior_msg_idx: Dict[str, int] = {}
+        prior_filename: Dict[str, str] = {}
+        for entry in previous_marker_metadata or []:
+            parts = entry.split(":", 2)
+            if len(parts) < 3 or parts[1] != marker_kind:
+                continue
+            try:
+                msg_idx = int(parts[0])
+            except ValueError:
+                continue
+            decoded = unquote(parts[2])
+            file_id_part, _, fname_part = decoded.partition(":")
+            if file_id_part:
+                prior_msg_idx[file_id_part] = msg_idx
+                if fname_part:
+                    prior_filename[file_id_part] = fname_part
+
+        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
+        latest_user_msg_idx = max(0, user_msg_count - 1)
+
+        raw_file_msg_idx: Dict[str, int] = {}
+        if raw_messages:
+            raw_user_msg_idx = -1
+            for raw_msg in raw_messages:
+                if not isinstance(raw_msg, dict) or raw_msg.get("role") != "user":
+                    continue
+                raw_user_msg_idx += 1
+                for file_id in cls._collect_file_ids(raw_msg.get("files")):
+                    raw_file_msg_idx.setdefault(file_id, raw_user_msg_idx)
+
+        anchor: Dict[str, int] = {}
+        filename: Dict[str, str] = {}
+
+        for file in __files__ or []:
+            if file.get("type") != "file" or file.get("context") != "full":
+                continue
+            file_id = file.get("id")
+            if not file_id:
+                continue
+            file_name = file.get("name", "")
+            if not accept(file_name):
+                continue
+            anchor[file_id] = prior_msg_idx.get(
+                file_id, raw_file_msg_idx.get(file_id, latest_user_msg_idx)
+            )
+            filename[file_id] = file_name
+
+        for file_id, msg_idx in prior_msg_idx.items():
+            if file_id in anchor:
+                continue
+            anchor[file_id] = msg_idx
+            if file_id in prior_filename:
+                filename[file_id] = prior_filename[file_id]
+
+        ordered = sorted(anchor.items(), key=lambda kv: (kv[1], kv[0]))
+        return (
+            {fid: idx for fid, idx in ordered},
+            {fid: filename[fid] for fid, _ in ordered if fid in filename},
+        )
+
+    async def _get_file_text_from_file_id(self, file_id: str) -> Optional[str]:
+        """Return the plain text OpenWebUI extracted for a file, or None.
+
+        This is the same content OpenWebUI itself injects into its ``<context>``
+        template for a full-context file, so reading it here changes what the
+        model sees only in position, not in substance -- and it keeps working on
+        later turns, when the file is gone from ``__files__``.
+        """
+        if not FILES_AVAILABLE:
+            return None
+        try:
+            file = await Files.get_file_by_id(file_id)
+        except Exception as e:
+            logger.warning(f"Full-context text: could not load file {file_id}: {e}")
+            return None
+        if not file:
+            return None
+        data = getattr(file, "data", None)
+        content = data.get("content") if isinstance(data, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        return None
+
+    async def _get_full_context_texts(
+        self,
+        __files__: Optional[List[Dict[str, Any]]],
+        previous_marker_metadata: List[str],
+        processed_messages: List[Dict[str, Any]],
+        raw_messages: Optional[List[Dict[str, Any]]] = None,
+        exclude_pdfs: bool = True,
+    ) -> tuple[Dict[int, List[Dict[str, Any]]], List[str], List[str]]:
+        """Turn non-native full-context uploads into anchored, cacheable text blocks.
+
+        A file uploaded with Full Context arrives inside OpenWebUI's
+        ``### Task: ... <context><source>...`` template, merged into the last
+        user message. The cache-control pass has to treat that template as
+        volatile -- for retrieved RAG chunks it genuinely is, they are re-ranked
+        against every new question -- so the breakpoint lands *before* it and the
+        file is re-sent uncached on every single turn. For a 2 MB EPUB that is
+        the whole book, every turn.
+
+        A full-context file is not volatile, though: it is the entire file, the
+        same bytes each turn. So it gets the same treatment PDFs already get --
+        anchored to the user message it was attached to, placed ahead of the
+        prose, and cut out of the RAG template by the caller. From there the
+        existing breakpoint covers it and the book is written to cache once.
+
+        Returns ``(anchor_msg_idx -> blocks, markers, filenames)``; the filenames
+        are what the caller must strip from the RAG template.
+        """
+        blocks_by_user_msg: Dict[int, List[Dict[str, Any]]] = {}
+        markers: List[str] = []
+        filenames: List[str] = []
+
+        if not FILES_AVAILABLE:
+            return blocks_by_user_msg, markers, filenames
+
+        anchors, names = self._resolve_full_context_anchors(
+            "fctx",
+            lambda name: not (exclude_pdfs and name.lower().endswith(".pdf")),
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+        )
+
+        for file_id, anchor_msg_idx in anchors.items():
+            content = await self._get_file_text_from_file_id(file_id)
+            if not content:
+                continue
+            title = names.get(file_id) or file_id
+            blocks_by_user_msg.setdefault(anchor_msg_idx, []).append(
+                {
+                    "type": "text",
+                    "text": f'<source name="{title}">\n{content}\n</source>',
+                }
+            )
+            filenames.append(title)
+            markers.append(
+                self._create_metadata_marker(
+                    "fctx", f"{file_id}:{title}", messagenum=anchor_msg_idx
+                )
+            )
+
+        if filenames:
+            logger.debug(
+                f"📎 Full-context text: anchored {len(filenames)} file(s) as cacheable blocks"
+            )
+        return blocks_by_user_msg, markers, filenames
+
     async def _get_full_context_pdfs(
         self,
         __files__: Optional[List[Dict[str, Any]]],
@@ -5990,104 +6302,14 @@ class Pipe:
         if not FILES_AVAILABLE:
             return blocks_by_user_msg, markers
 
-        # Build a lookup of (file_id → msg_idx) for PDFs already anchored on
-        # previous turns. Marker payload for "pdf" is "file_id:filename".
-        prior_pdf_msg_idx: Dict[str, int] = {}
-        prior_pdf_filename: Dict[str, str] = {}
-        for entry in previous_marker_metadata:
-            parts = entry.split(":", 2)
-            if len(parts) < 3 or parts[1] != "pdf":
-                continue
-            try:
-                msg_idx = int(parts[0])
-            except ValueError:
-                continue
-            decoded = unquote(parts[2])
-            file_id_part, _, fname_part = decoded.partition(":")
-            if file_id_part:
-                prior_pdf_msg_idx[file_id_part] = msg_idx
-                if fname_part:
-                    prior_pdf_filename[file_id_part] = fname_part
-
-        # Index of the latest user-message — anchor for newly attached PDFs.
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
-
-        def _collect_file_ids(value: Any) -> List[str]:
-            """Recursively collect file/id-like identifiers from a nested dict/list structure."""
-            ids: List[str] = []
-            if isinstance(value, dict):
-                for key in ("id", "file_id"):
-                    file_id_value = value.get(key)
-                    if isinstance(file_id_value, str) and file_id_value:
-                        ids.append(file_id_value)
-                for key in ("file", "meta", "metadata"):
-                    nested = value.get(key)
-                    if nested is not None:
-                        ids.extend(_collect_file_ids(nested))
-            elif isinstance(value, list):
-                for item in value:
-                    ids.extend(_collect_file_ids(item))
-            return ids
-
-        # OpenWebUI may include all historical chat files in __files__ on every
-        # turn. Preserve cache stability by anchoring each file to the user
-        # message that owns it in the raw chat history, not to the latest query.
-        raw_file_msg_idx: Dict[str, int] = {}
-        if raw_messages:
-            raw_user_msg_idx = -1
-            for raw_msg in raw_messages:
-                if not isinstance(raw_msg, dict) or raw_msg.get("role") != "user":
-                    continue
-                raw_user_msg_idx += 1
-                for file_id in _collect_file_ids(raw_msg.get("files")):
-                    raw_file_msg_idx.setdefault(file_id, raw_user_msg_idx)
-
-        # Collect every PDF that needs a native document block this turn, keyed
-        # by file_id → (anchor_msg_idx). Two sources are merged:
-        #   1) the current turn's __files__ (authoritative for new uploads and
-        #      filenames), and
-        #   2) PDFs anchored on previous turns via persisted markers.
-        # OpenWebUI does NOT reliably re-send historical full-context files in
-        # __files__ on follow-up turns. Without (2) the native document block
-        # silently vanishes from the cache prefix on every later turn, which
-        # both hides the PDF from the model and forces a full cache rebuild.
-        pdf_anchor: Dict[str, int] = {}
-        pdf_filename: Dict[str, str] = {}
-
-        for file in __files__ or []:
-            # Only process files with 'full' context (not RAG chunks)
-            if file.get("type") != "file" or file.get("context") != "full":
-                continue
-
-            file_id = file.get("id")
-            if not file_id:
-                continue
-
-            # PDF only — non-PDF native uploads aren't supported here
-            file_name = file.get("name", "")
-            if not file_name.lower().endswith(".pdf"):
-                continue
-
-            # Decide which user message this PDF anchors to. Priority:
-            # 1) persisted marker from earlier pipe turns,
-            # 2) OpenWebUI raw message.files ownership,
-            # 3) latest user message for genuinely new files when no ownership
-            #    metadata is available.
-            pdf_anchor[file_id] = prior_pdf_msg_idx.get(
-                file_id, raw_file_msg_idx.get(file_id, latest_user_msg_idx)
-            )
-            pdf_filename[file_id] = file_name
-
-        # Re-inject PDFs known only from prior-turn markers (OpenWebUI dropped
-        # them from __files__ this turn). Keep their original anchor index so
-        # the byte-prefix stays identical across turns.
-        for file_id, msg_idx in prior_pdf_msg_idx.items():
-            if file_id in pdf_anchor:
-                continue
-            pdf_anchor[file_id] = msg_idx
-            if file_id in prior_pdf_filename:
-                pdf_filename[file_id] = prior_pdf_filename[file_id]
+        pdf_anchor, pdf_filename = self._resolve_full_context_anchors(
+            "pdf",
+            lambda name: name.lower().endswith(".pdf"),
+            __files__,
+            previous_marker_metadata,
+            processed_messages,
+            raw_messages,
+        )
 
         for file_id, anchor_msg_idx in pdf_anchor.items():
             # Re-load base64 every turn (Anthropic native PDF blocks have no
@@ -6758,6 +6980,10 @@ class Pipe:
         key = name[: -len("_tool_result")] if name.endswith("_tool_result") else name
         if key.startswith("tool_search"):
             return "tool_search"
+        # bash_code_execution / text_editor_code_execution are variants of the
+        # same user-facing concept; hiding "code_execution" must cover all three.
+        if key.endswith("code_execution"):
+            return "code_execution"
         return key
 
     def _is_block_hidden(self, name: str) -> bool:
@@ -6775,9 +7001,18 @@ class Pipe:
         return self._block_visibility_key(name) in hidden
 
     @staticmethod
-    def _parse_hidden_blocks(raw: str) -> frozenset:
-        """Parse a HIDE_BLOCKS valve string into a set of block concept keys."""
-        return frozenset(part.strip() for part in (raw or "").split(",") if part.strip())
+    def _parse_hidden_blocks(raw: Any) -> frozenset:
+        """Normalize the HIDE_BLOCKS valve into a set of block concept keys.
+
+        The valve is a multiselect (``list[str]``) since v0.9.25. Values saved
+        under the previous comma-separated ``str`` form are still accepted so an
+        upgrade does not silently drop a user's preference.
+        """
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not raw:
+            return frozenset()
+        return frozenset(str(part).strip() for part in raw if str(part).strip())
 
     def _format_hidden_block(self, payloads: list, label_id: str = "") -> str:
         """Render API blocks as an invisible, replay-stable markdown carrier.
@@ -6959,6 +7194,59 @@ class Pipe:
         last_status["output"] = collected
         return self._format_bash_process_result(last_status)
 
+    async def _await_tool_approval(self, tool_call_data: dict) -> tuple[bool, Any]:
+        """Ask the user to allow this tool call when approval mode is 'ask'.
+
+        OpenWebUI 0.11.1 added human-in-the-loop tool approval, but it is enforced
+        inside `utils/middleware.py` — i.e. only around OpenWebUI's OWN tool loop.
+        A manifold that runs its own loop (this one) would execute tools
+        unchallenged while the UI claims approval is on, so the gate is
+        reproduced here at the single point where a tool coroutine is awaited.
+
+        Returns ``(approved, denial_payload)``. The denial payload is fed back to
+        Claude as this call's tool result, so a refusal reads as a normal
+        (negative) result and the tool loop continues instead of stalling.
+        """
+        mode, event_call = TOOL_APPROVAL.get()
+        if mode != "ask" or event_call is None:
+            return True, None
+
+        name = tool_call_data.get("name", "tool")
+        try:
+            args = json.dumps(
+                tool_call_data.get("input") or {}, ensure_ascii=False, indent=2
+            )
+        except (TypeError, ValueError):
+            args = str(tool_call_data.get("input"))
+        if len(args) > 2000:
+            args = args[:2000] + "\n… (truncated)"
+
+        try:
+            answer = await event_call(
+                {
+                    "type": "confirmation",
+                    "data": {
+                        "title": f"Run tool: {name}?",
+                        "message": f"The model wants to call `{name}` with:\n\n```json\n{args}\n```",
+                    },
+                }
+            )
+        except Exception as e:
+            # A broken approval channel must not silently turn into free
+            # execution — that is the exact failure the gate exists to prevent.
+            logger.warning("Tool approval prompt failed for '%s': %s", name, e)
+            answer = False
+
+        if answer:
+            logger.info("Tool '%s' approved by user", name)
+            return True, None
+
+        logger.info("Tool '%s' denied by user", name)
+        return False, json.dumps(
+            {"error": f"The user denied permission to run '{name}'."},
+            ensure_ascii=False,
+        )
+
     async def _await_tool_task_result(
         self,
         tool_call_data: dict,
@@ -6972,6 +7260,13 @@ class Pipe:
         BASH_TOOL_TIMEOUT and must not be killed early by the generic limit."""
         if timeout_s is None:
             timeout_s = getattr(self.valves, "TOOL_CALL_TIMEOUT", self.TOOL_CALL_TIMEOUT)
+
+        approved, denial = await self._await_tool_approval(tool_call_data)
+        if not approved:
+            if hasattr(awaitable, "close"):
+                awaitable.close()  # never started; release it without a warning
+            return tool_call_data, denial, None
+
         try:
             result = await asyncio.wait_for(awaitable, timeout=max(1, float(timeout_s)))
             return tool_call_data, result, None
@@ -7496,9 +7791,11 @@ class Pipe:
         Uses the same HTML structure as OpenWebUI's built-in code_interpreter,
         giving us spinner, Analyzing.../Analyzed transitions, and output display for free.
         """
-        if SLIM_OUTPUT.get():
+        if self._is_block_hidden("code_execution"):
             # Reached directly by the code-execution handlers rather than through
-            # _is_block_hidden, so it needs its own guard.
+            # the server-tool formatters, so it needs its own guard. Covers both
+            # SLIM_OUTPUT (sub-agent runs) and an explicit HIDE_BLOCKS opt-out —
+            # without this, hiding "code_execution" silently did nothing.
             return ""
 
         done_str = "true" if done else "false"
@@ -8257,11 +8554,12 @@ class Pipe:
             input_tokens + cache_creation_input_tokens + cache_read_input_tokens
         )
         total_usage["_ctx_output"] = current_output_tokens
+        # OpenWebUI's contract (utils/response.py normalize_usage):
+        # total_tokens == input_tokens + output_tokens, with cache traffic kept
+        # in its own two fields. Adding the cache counters here double-counted
+        # them against every other provider on the analytics page.
         total_usage["total_tokens"] = (
-            total_usage.get("input_tokens", 0)
-            + total_usage.get("output_tokens", 0)
-            + total_usage.get("cache_creation_input_tokens", 0)
-            + total_usage.get("cache_read_input_tokens", 0)
+            total_usage.get("input_tokens", 0) + total_usage.get("output_tokens", 0)
         )
         logger.debug(f" Accumulated usage: {total_usage}")
 
@@ -8749,6 +9047,7 @@ class Pipe:
         __task__: Optional[dict[str, Any]] = None,
         __task_body__: Optional[dict[str, Any]] = None,
         __request__: Optional[Any] = None,
+        __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ):
         """
         OpenWebUI Claude streaming pipe with integrated streaming logic.
@@ -8823,7 +9122,19 @@ class Pipe:
             # Publish this user's block visibility preference for the formatters,
             # which are too deep in the call chain to be handed a request context.
             HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", ""))
+                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+            )
+
+            # Human-in-the-loop tool approval (OpenWebUI 0.11.1+). The mode is a
+            # per-conversation chat param; automations, channel replies and
+            # temporary chats never carry "ask". Without an __event_call__ there
+            # is no channel to ask on, so the gate stays open — matching
+            # OpenWebUI, which also only prompts in a saved conversation.
+            TOOL_APPROVAL.set(
+                (
+                    (__metadata__ or {}).get("params", {}).get("tool_approval_mode", "full"),
+                    __event_call__,
+                )
             )
 
             # OpenWebUI marks sub-agent runs with request.state.internal; it is
@@ -9207,11 +9518,11 @@ class Pipe:
                                         # _handle_message_start_usage for why the two
                                         # must not be mixed.
                                         total_usage["_ctx_output"] = current_output_tokens
+                                        # OpenWebUI contract: input + output only,
+                                        # cache traffic stays in its own fields.
                                         total_usage["total_tokens"] = (
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
-                                            + total_usage.get("cache_creation_input_tokens", 0)
-                                            + total_usage.get("cache_read_input_tokens", 0)
                                         )
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)

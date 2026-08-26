@@ -18,6 +18,7 @@ class PipeOrchestratorMethods:
         __task__: Optional[dict[str, Any]] = None,
         __task_body__: Optional[dict[str, Any]] = None,
         __request__: Optional[Any] = None,
+        __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ):
         """
         OpenWebUI Claude streaming pipe with integrated streaming logic.
@@ -92,7 +93,19 @@ class PipeOrchestratorMethods:
             # Publish this user's block visibility preference for the formatters,
             # which are too deep in the call chain to be handed a request context.
             HIDDEN_BLOCKS.set(
-                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", ""))
+                self._parse_hidden_blocks(getattr(user_valves, "HIDE_BLOCKS", None))
+            )
+
+            # Human-in-the-loop tool approval (OpenWebUI 0.11.1+). The mode is a
+            # per-conversation chat param; automations, channel replies and
+            # temporary chats never carry "ask". Without an __event_call__ there
+            # is no channel to ask on, so the gate stays open — matching
+            # OpenWebUI, which also only prompts in a saved conversation.
+            TOOL_APPROVAL.set(
+                (
+                    (__metadata__ or {}).get("params", {}).get("tool_approval_mode", "full"),
+                    __event_call__,
+                )
             )
 
             # OpenWebUI marks sub-agent runs with request.state.internal; it is
@@ -476,11 +489,11 @@ class PipeOrchestratorMethods:
                                         # _handle_message_start_usage for why the two
                                         # must not be mixed.
                                         total_usage["_ctx_output"] = current_output_tokens
+                                        # OpenWebUI contract: input + output only,
+                                        # cache traffic stays in its own fields.
                                         total_usage["total_tokens"] = (
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
-                                            + total_usage.get("cache_creation_input_tokens", 0)
-                                            + total_usage.get("cache_read_input_tokens", 0)
                                         )
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)

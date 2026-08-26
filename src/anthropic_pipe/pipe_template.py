@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.25
+version: 0.9.26
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,12 +38,20 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.26
+- Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
+- Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
+- HIDE_BLOCKS is now a multiselect instead of a comma-separated string; existing string values still load
+- Fixed HIDE_BLOCKS never hiding code execution: the collapsible ignored the valve, and the bash / text editor variants were not recognised as the same block
+- Fixed total_tokens double-counting cache traffic; now input + output, matching OpenWebUI's usage contract, with cache reads and writes in their own two fields
+- Added ask_user (OpenWebUI 0.11.1) to the tool-search exclude list
+
 v0.9.25
-- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install of any version the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working untouched -- there is no migration step, and without WEBUI_SECRET_KEY (or without the cryptography package) values simply pass through
-- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext (the valve dump shows the encrypted value)
-- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching) to control how long the discovered model list is cached. Previously the 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
-- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models for up to 24 hours
-- A failed model refresh no longer falls back to a cache that was fetched from different connection settings -- showing the wrong endpoint's models is worse than showing none
+- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working -- no migration step
+- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext
+- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching). The 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
+- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models
+- A failed model refresh no longer falls back to a cache that was fetched from different connection settings
 
 v0.9.24
 - Fixed the context-window reading OpenWebUI uses for auto-compaction: prompt_tokens/completion_tokens now carry the last call's full input (uncached + cache writes + cache reads) instead of being absent. input_tokens/output_tokens stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly, and compaction fired far too late or never
@@ -519,7 +527,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote
 from typing import Any, Callable, List, Union, Dict, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from anthropic import (
     APIStatusError,
     AsyncAnthropic,
@@ -709,6 +717,20 @@ HIDDEN_BLOCKS: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 # HIDDEN_BLOCKS: one Pipe object serves concurrent requests.
 SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "anthropic_pipe_slim_output", default=False
+)
+
+# Human-in-the-loop tool approval (OpenWebUI 0.11.1+). OpenWebUI enforces its own
+# approval gate inside `utils/middleware.py`, which only covers ITS tool loop --
+# a manifold that runs its own loop bypasses the gate entirely. We re-implement
+# it at the single point where a tool coroutine is actually awaited.
+#
+# Holds `(mode, event_call)` for the current request: `mode` is
+# `__metadata__["params"]["tool_approval_mode"]` ("full" = run freely, "ask" =
+# confirm each call), `event_call` is OpenWebUI's blocking `__event_call__`.
+# Same ContextVar reasoning as HIDDEN_BLOCKS: one Pipe object serves concurrent
+# requests, so this must not live on `self`.
+TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "anthropic_pipe_tool_approval", default=("full", None)
 )
 
 # Pattern to strip OpenWebUI <details type="code_interpreter"> blocks from conversation history.
@@ -1480,17 +1502,42 @@ class Pipe:
             default=True,
             description="Upload PDFs as native base64 documents instead of RAG text extraction. Only applies to 'Use Full Document' mode.",
         )
-        HIDE_BLOCKS: str = Field(
-            default="",
+        HIDE_BLOCKS: List[str] = Field(
+            default=[],
+            json_schema_extra={
+                "input": {
+                    "type": "multiselect",
+                    "options": [
+                        "web_search",
+                        "web_fetch",
+                        "tool_search",
+                        "advisor",
+                        "code_execution",
+                        "compaction",
+                    ],
+                }
+            },
             description=(
-                "Comma-separated list of content block types to hide from your chat, "
-                "e.g. 'tool_search,compaction'. A hidden block's collapsible is not "
-                "rendered at all — its progress is reported by the status line instead. "
-                "The block is still replayed to the API, so hiding it does not change "
-                "the model's view of the conversation. Known values: web_search, "
-                "web_fetch, tool_search, advisor, code_execution, compaction."
+                "Content block types to hide from your chat. A hidden block's "
+                "collapsible is not rendered at all — its progress is reported by "
+                "the status line instead. The block is still replayed to the API, "
+                "so hiding it does not change the model's view of the conversation."
             ),
         )
+
+        @field_validator("HIDE_BLOCKS", mode="before")
+        @classmethod
+        def _coerce_hide_blocks(cls, v):
+            """Accept the pre-v0.9.25 comma-separated string form.
+
+            HIDE_BLOCKS used to be a `str`. Existing users have one stored, and
+            OpenWebUI validates the whole UserValves model on every save — so
+            without this, a saved `""` makes *every* valve update fail with a
+            400 until the user manually clears the field.
+            """
+            if isinstance(v, str):
+                return [part.strip() for part in v.split(",") if part.strip()]
+            return v
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
@@ -1556,7 +1603,7 @@ class Pipe:
             bash,
             str_replace_based_edit_tool,
             computer,
-             add_memory, calculate_timestamp, create_automation,
+             add_memory, ask_user, calculate_timestamp, create_automation,
             create_calendar_event, create_tasks, delegate_task,
             delete_automation, delete_calendar_event, delete_memory,
             edit_image, execute_code, fetch_url, generate_image,

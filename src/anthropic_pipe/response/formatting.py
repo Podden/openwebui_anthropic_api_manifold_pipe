@@ -34,6 +34,10 @@ class PipeStreamSupportMethods:
         key = name[: -len("_tool_result")] if name.endswith("_tool_result") else name
         if key.startswith("tool_search"):
             return "tool_search"
+        # bash_code_execution / text_editor_code_execution are variants of the
+        # same user-facing concept; hiding "code_execution" must cover all three.
+        if key.endswith("code_execution"):
+            return "code_execution"
         return key
 
     def _is_block_hidden(self, name: str) -> bool:
@@ -51,9 +55,18 @@ class PipeStreamSupportMethods:
         return self._block_visibility_key(name) in hidden
 
     @staticmethod
-    def _parse_hidden_blocks(raw: str) -> frozenset:
-        """Parse a HIDE_BLOCKS valve string into a set of block concept keys."""
-        return frozenset(part.strip() for part in (raw or "").split(",") if part.strip())
+    def _parse_hidden_blocks(raw: Any) -> frozenset:
+        """Normalize the HIDE_BLOCKS valve into a set of block concept keys.
+
+        The valve is a multiselect (``list[str]``) since v0.9.25. Values saved
+        under the previous comma-separated ``str`` form are still accepted so an
+        upgrade does not silently drop a user's preference.
+        """
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not raw:
+            return frozenset()
+        return frozenset(str(part).strip() for part in raw if str(part).strip())
 
     def _format_hidden_block(self, payloads: list, label_id: str = "") -> str:
         """Render API blocks as an invisible, replay-stable markdown carrier.
@@ -235,6 +248,59 @@ class PipeStreamSupportMethods:
         last_status["output"] = collected
         return self._format_bash_process_result(last_status)
 
+    async def _await_tool_approval(self, tool_call_data: dict) -> tuple[bool, Any]:
+        """Ask the user to allow this tool call when approval mode is 'ask'.
+
+        OpenWebUI 0.11.1 added human-in-the-loop tool approval, but it is enforced
+        inside `utils/middleware.py` — i.e. only around OpenWebUI's OWN tool loop.
+        A manifold that runs its own loop (this one) would execute tools
+        unchallenged while the UI claims approval is on, so the gate is
+        reproduced here at the single point where a tool coroutine is awaited.
+
+        Returns ``(approved, denial_payload)``. The denial payload is fed back to
+        Claude as this call's tool result, so a refusal reads as a normal
+        (negative) result and the tool loop continues instead of stalling.
+        """
+        mode, event_call = TOOL_APPROVAL.get()
+        if mode != "ask" or event_call is None:
+            return True, None
+
+        name = tool_call_data.get("name", "tool")
+        try:
+            args = json.dumps(
+                tool_call_data.get("input") or {}, ensure_ascii=False, indent=2
+            )
+        except (TypeError, ValueError):
+            args = str(tool_call_data.get("input"))
+        if len(args) > 2000:
+            args = args[:2000] + "\n… (truncated)"
+
+        try:
+            answer = await event_call(
+                {
+                    "type": "confirmation",
+                    "data": {
+                        "title": f"Run tool: {name}?",
+                        "message": f"The model wants to call `{name}` with:\n\n```json\n{args}\n```",
+                    },
+                }
+            )
+        except Exception as e:
+            # A broken approval channel must not silently turn into free
+            # execution — that is the exact failure the gate exists to prevent.
+            logger.warning("Tool approval prompt failed for '%s': %s", name, e)
+            answer = False
+
+        if answer:
+            logger.info("Tool '%s' approved by user", name)
+            return True, None
+
+        logger.info("Tool '%s' denied by user", name)
+        return False, json.dumps(
+            {"error": f"The user denied permission to run '{name}'."},
+            ensure_ascii=False,
+        )
+
     async def _await_tool_task_result(
         self,
         tool_call_data: dict,
@@ -248,6 +314,13 @@ class PipeStreamSupportMethods:
         BASH_TOOL_TIMEOUT and must not be killed early by the generic limit."""
         if timeout_s is None:
             timeout_s = getattr(self.valves, "TOOL_CALL_TIMEOUT", self.TOOL_CALL_TIMEOUT)
+
+        approved, denial = await self._await_tool_approval(tool_call_data)
+        if not approved:
+            if hasattr(awaitable, "close"):
+                awaitable.close()  # never started; release it without a warning
+            return tool_call_data, denial, None
+
         try:
             result = await asyncio.wait_for(awaitable, timeout=max(1, float(timeout_s)))
             return tool_call_data, result, None
@@ -772,9 +845,11 @@ class PipeStreamSupportMethods:
         Uses the same HTML structure as OpenWebUI's built-in code_interpreter,
         giving us spinner, Analyzing.../Analyzed transitions, and output display for free.
         """
-        if SLIM_OUTPUT.get():
+        if self._is_block_hidden("code_execution"):
             # Reached directly by the code-execution handlers rather than through
-            # _is_block_hidden, so it needs its own guard.
+            # the server-tool formatters, so it needs its own guard. Covers both
+            # SLIM_OUTPUT (sub-agent runs) and an explicit HIDE_BLOCKS opt-out —
+            # without this, hiding "code_execution" silently did nothing.
             return ""
 
         done_str = "true" if done else "false"

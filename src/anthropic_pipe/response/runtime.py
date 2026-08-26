@@ -76,11 +76,12 @@ class PipeStreamRuntimeSupportMethods:
             input_tokens + cache_creation_input_tokens + cache_read_input_tokens
         )
         total_usage["_ctx_output"] = current_output_tokens
+        # OpenWebUI's contract (utils/response.py normalize_usage):
+        # total_tokens == input_tokens + output_tokens, with cache traffic kept
+        # in its own two fields. Adding the cache counters here double-counted
+        # them against every other provider on the analytics page.
         total_usage["total_tokens"] = (
-            total_usage.get("input_tokens", 0)
-            + total_usage.get("output_tokens", 0)
-            + total_usage.get("cache_creation_input_tokens", 0)
-            + total_usage.get("cache_read_input_tokens", 0)
+            total_usage.get("input_tokens", 0) + total_usage.get("output_tokens", 0)
         )
         logger.debug(f" Accumulated usage: {total_usage}")
 

@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.25`
+- **Current pipe version:** `0.9.26`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -29,7 +29,7 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 | **Files** | Native PDF upload, Anthropic Files API upload/download, file persistence markers, code-exec file roundtrips |
 | **Skills** | Prebuilt and custom Agent Skills, skill validation, API-side skill support via Files API + code execution |
 | **Context efficiency** | Prompt caching, optional 1-hour cache TTL, token/cache stats, context editing, compaction, tool search, Advisor sub-inference |
-| **OpenWebUI integration** | Notes, channels, task generation, built-in tools, MCP tools, toggle filters, companion filter for native Anthropic buttons |
+| **OpenWebUI integration** | Notes, channels, task generation, built-in tools, MCP tools, sub-agents, tool approval, toggle filters, companion filter for native Anthropic buttons |
 
 ---
 
@@ -61,7 +61,7 @@ For each Claude model in **Admin Settings → Models**:
 1. Attach the toggle filters you want available for that model
 2. Set **Function Calling** to **`Native`**
 3. Optionally attach the **Companion Filter** if you want OpenWebUI's built-in `web_search` / `code_interpreter` buttons to route to Anthropic-native tools
-4. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 4.7** or **Sonnet 4.6**)
+4. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 5** or **Sonnet 5**)
 
 ---
 
@@ -82,6 +82,12 @@ Recent OpenWebUI releases matter for this pipe:
    - active filter badges can expose valve configuration shortcuts directly in chat
 - **0.9.2**
    - persisted skill mentions inject into system prompts reliably on stored chats
+- **0.11**
+   - sub-agents (`delegate_task`) and the built-in tools `notify`, `timer`, `list_chat_files`, `grep_chat_files`, `query_chat_files`
+   - auto-compaction reads the context gauge the pipe reports
+- **0.11.1**
+   - human-in-the-loop tool approval, and the `ask_user` built-in tool
+   - multiselect valve inputs
 
 If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.9.0+` moved DB/model helpers to async. The pipe is already migrated, but custom additions must also follow the async model/helper rules. See the official migration guide: https://docs.openwebui.com/features/extensibility/plugin/migration/to-0.9.0
 
@@ -140,7 +146,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `THINKING_BUDGET_TOKENS` | `8192` | Manual thinking budget for models that still use `budget_tokens` |
 | `THINKING_DISPLAY` | `omitted` | `summarized` streams summarized thinking, `omitted` hides it for faster time-to-first-text |
 | `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
-| `HIDE_BLOCKS` | `""` | Comma-separated block types to hide from the chat display (still replayed to the API): `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
+| `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
 | `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
 
@@ -195,6 +201,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 - `CACHE_TTL="1 hour"` maps to Anthropic's extended cache TTL (`{"type": "ephemeral", "ttl": "1h"}`).
 - `CONTEXT_EDITING_THINKING_KEEP=0` is the safest cache-friendly default. Sliding windows (`>0`) can reduce cache efficiency on long thinking-heavy chats.
 - `ENABLE_DYNAMIC_FILTERING` improves quality for supported web-search / web-fetch models but is **substantially slower** than the normal flow.
+- **Tool approval** (OpenWebUI `0.11.1`) is honored by the pipe itself. OpenWebUI enforces its own gate inside its native tool loop, which a manifold never enters — so without this the setting silently did nothing. Enable it with `ENABLE_TOOL_PERMISSIONS=true` **and** the matching admin toggle (Admin Settings → Chat → tool permissions); the env var only seeds the persisted config on a fresh database. With approval set to `ask`, every client, built-in and Open Terminal tool call waits for an explicit allow/deny, one prompt per call. A denial is returned to the model as an ordinary tool result, so the conversation continues instead of erroring.
 - There is **no dedicated Claude memory tool** documented here anymore. This README intentionally reflects the current pipe surface only.
 
 ### 🔐 API key storage
@@ -222,6 +229,14 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.26`
+- Added **human-in-the-loop tool approval** (OpenWebUI `0.11.1`). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters — so the setting silently did nothing here. Now, with approval set to `ask`, every client, built-in and Open Terminal tool call waits for an explicit allow/deny, and a denial goes back to the model as a normal tool result so the turn continues instead of erroring
+- Fixed a client tool failing outright when the model sends an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, matching what OpenWebUI does in its own tool loop
+- `HIDE_BLOCKS` is now a **multiselect** instead of a comma-separated string; existing string values still load
+- Fixed `HIDE_BLOCKS` never hiding code execution: the collapsible ignored the valve entirely, and the bash / text editor variants were not recognised as the same block
+- Fixed `total_tokens` double-counting cache traffic — now `input + output`, matching OpenWebUI's own usage contract. Cache reads and writes stay in their own two fields
+- Added `ask_user` (OpenWebUI `0.11.1`) to the tool-search exclude list
+
 ### `v0.9.25`
 - The Anthropic API key (admin valve and per-user override) is stored **encrypted** — Fernet, key derived from `WEBUI_SECRET_KEY`. OpenWebUI's own valve encryption is opt-in (`ENABLE_VALVE_ENCRYPTION`, default off), so on a default install this is what keeps the key out of the database in plaintext. Where that flag is on, the pipe defers to OpenWebUI instead of encrypting twice. Existing plaintext keys keep working, no migration needed
 - Debug logs start with the detected OpenWebUI version and no longer contain the API key in plaintext
