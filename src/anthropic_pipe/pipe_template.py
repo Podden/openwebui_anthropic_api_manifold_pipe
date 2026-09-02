@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.27
+version: 0.9.28
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,10 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.28
+- Added an estimated USD cost per turn (new SHOW_COST user valve): reported as `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage, so it shows in the message info tooltip and is persisted for analytics, and appended to the SHOW_TOKEN_COUNT status line. Anthropic exposes no pricing via the API, so prices come from a built-in list-price table; admins can patch it without a release via the new MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes are split 5m/1h from usage.cache_creation, fast mode and US data residency are detected from the response usage, and web searches are added at $10 per 1,000
+
 v0.9.27
 - Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
 - Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
@@ -1143,6 +1147,9 @@ class PipeRequestContext:
 # BEGIN GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
+# END GENERATED SECTION: anthropic_pipe.shared.pricing
+
 
 
 
@@ -1479,6 +1486,16 @@ class Pipe:
             "Changing the API key, base URL, workspace or ENABLED_MODELS always "
             "refreshes immediately, regardless of this setting.",
         )
+        MODEL_PRICING_OVERRIDES: str = Field(
+            default="",
+            description="JSON patch for the built-in price table used by the SHOW_COST estimate, in USD per "
+            "million tokens, keyed by model id. Keys: input, output, cache_write_5m, cache_write_1h, "
+            "cache_read, fast_input, fast_output; omitted cache rates derive from `input` at Anthropic's "
+            "standard multipliers (1.25x / 2x / 0.1x). Example: "
+            '{"claude-sonnet-5": {"input": 3, "output": 15}, "my-proxy-model": {"input": 1, "output": 5}}. '
+            "Anthropic does not publish prices through the API, so this is how to track price changes "
+            "or a negotiated rate without waiting for a pipe release.",
+        )
 
     class UserValves(BaseModel):
         ANTHROPIC_API_KEY: EncryptedStr = Field(
@@ -1547,6 +1564,15 @@ class Pipe:
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
+        )
+        SHOW_COST: bool = Field(
+            default=True,
+            description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
+            "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
+            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
+            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
+            "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
         )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,

@@ -31,6 +31,7 @@ The build works by marker pairs (`# BEGIN/END GENERATED SECTION: anthropic_pipe.
 | `src/anthropic_pipe/request/{cache_control,messages,tools,files,rag}.py` | `Pipe` method groups for the request half of a turn. |
 | `src/anthropic_pipe/response/*.py` | Response half: one module per Anthropic content-block family (`text_block`, `thinking_block`, `client_tool`, `server_tool`, `code_execution_results`, `web_tool_results`, `internal_tool_results`, `compaction_block`, `status_events`) plus `state`, `handlers`, `registry`, `runtime`, `formatting`. |
 | `src/anthropic_pipe/shared/{models,tasks}.py` | Model discovery/capabilities and OpenWebUI task handling (title, tags, follow-ups, memory review). |
+| `src/anthropic_pipe/shared/pricing.py` | Standalone `ModelPricing` class (module-level section, not a `Pipe` mixin): list-price table, `MODEL_PRICING_OVERRIDES` parsing, turn cost estimate. Anthropic exposes no prices via API, so the table is hand-maintained. |
 | `src/anthropic_pipe/pipe_orchestrator.py` | `Pipe.pipe()` request orchestration and the high-level tool loop. |
 | `helpers/build_anthropic_pipe.py` | Compiles `src/` into `anthropic_pipe.py`. |
 | `helpers/minify_pipe.py` | Strips comments/docstrings (keeps the module docstring OpenWebUI parses) for the upload artifact. |
@@ -58,6 +59,7 @@ Two module lists in `helpers/build_anthropic_pipe.py` are load-bearing:
 | Content-block streaming | `response/` — handlers are grouped by content type, not by Anthropic event type; `registry.py` wires them up |
 | Skills / tasks | `shared/tasks.py`, `request/files.py` → `_validate_and_get_skills` |
 | Formatting and persistence | `response/formatting.py`, `response/runtime.py` → `_format_thinking_block`, `_format_tool_result_block`, `_format_code_execution_block`, `_create_metadata_marker` |
+| Token usage and cost | `response/runtime.py` → `_handle_message_start_usage`, `_public_usage`; `shared/pricing.py` → `ModelPricing.estimate`. Private `_`-prefixed keys in `total_usage` (cache TTL split, fast/geo flags, web-search count) feed the estimate and are stripped before OpenWebUI sees the dict. |
 
 ## Invariants to preserve
 

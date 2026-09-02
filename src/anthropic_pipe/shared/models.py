@@ -92,6 +92,10 @@ class PipeModelSupportMethods:
         info.update(overrides)
         return info
 
+    def _model_pricing(self) -> "ModelPricing":
+        """Rate card for this pipe, with the admin's MODEL_PRICING_OVERRIDES applied."""
+        return ModelPricing(getattr(self.valves, "MODEL_PRICING_OVERRIDES", "") or "")
+
     def _model_cache_signature(self) -> str:
         """Fingerprint of the settings the model list depends on.
 
