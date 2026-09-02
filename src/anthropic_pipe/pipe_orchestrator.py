@@ -356,6 +356,7 @@ class PipeOrchestratorMethods:
                 tool_loop_iteration += 1
                 # Reset per-iteration state
                 stream_output_tokens = 0
+                stream_web_search_requests = 0
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -495,6 +496,20 @@ class PipeOrchestratorMethods:
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
                                         )
+                                        # Web searches are billed per request
+                                        # ($10/1k). Like output_tokens, the
+                                        # count is cumulative within one API
+                                        # call, so accumulate the delta.
+                                        server_tool_use = getattr(usage, "server_tool_use", None)
+                                        current_searches = (
+                                            getattr(server_tool_use, "web_search_requests", 0) or 0
+                                        ) if server_tool_use else 0
+                                        total_usage["_web_search_requests"] = (
+                                            total_usage.get("_web_search_requests", 0)
+                                            + (current_searches - stream_web_search_requests)
+                                        )
+                                        stream_web_search_requests = current_searches
+                                        ModelPricing.record_billing_modifiers(usage, total_usage)
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)
                                 if code_execution_container_id:
@@ -1176,6 +1191,17 @@ class PipeOrchestratorMethods:
         # ---------------------------------------------------------
 
         final_status = "✅ Response Complete"
+        # ============ Cost Estimate ============
+        # Stored as public keys so they travel with the usage dict: OpenWebUI
+        # renders every key of `message.usage` in the message info tooltip and
+        # persists the dict for the analytics page. Absent (not 0) for models
+        # with no known rate card.
+        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+            cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
+            if cost_breakdown is not None:
+                total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
+                total_usage["cost_breakdown_usd"] = cost_breakdown
+
         # ============ Token Count Display ============
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
         if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
@@ -1229,6 +1255,11 @@ class PipeOrchestratorMethods:
                 # me": the share of billed input served from cache at 0.1x.
                 if billed_input:
                     final_status += f" | ⚡ {cache_read / billed_input * 100:.0f}% cached"
+
+            # Estimated list-price cost of the whole turn (all calls). Silently
+            # absent for models with no known rate card rather than showing $0.
+            if "cost_usd" in total_usage:
+                final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
 
         # Consolidate: emit a final replace with the complete message so OpenWebUI
         # has the authoritative content (replaces any partial delta/replace state).

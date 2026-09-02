@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.27`
+- **Current pipe version:** `0.9.28`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -125,6 +125,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `TOOL_CALL_TIMEOUT` | `30` | Per-tool execution timeout in seconds |
 | `ENABLE_CACHE_DIAGNOSTICS` | `false` | Logs cache-prefix diffs between turns. Debugging only |
 | `MODEL_CACHE_TTL_MINUTES` | `1440` | How long the discovered model list is cached (`0` = re-fetch on every model list render). Changing API key, base URL, workspace or `ENABLED_MODELS` refreshes immediately regardless |
+| `MODEL_PRICING_OVERRIDES` | `""` | JSON patch for the built-in price table behind `SHOW_COST`, in USD per million tokens keyed by model id, e.g. `{"claude-sonnet-5": {"input": 3, "output": 15}}`. Keys: `input`, `output`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `fast_input`, `fast_output`; omitted cache rates derive from `input` at 1.25x / 2x / 0.1x. Anthropic publishes no prices through the API, so this is how to track price changes, negotiated rates or proxy models without a pipe release |
 
 #### `CACHE_CONTROL` options
 
@@ -148,6 +149,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
 | `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
+| `SHOW_COST` | `true` | Reports the estimated USD list-price cost of the turn as `cost_usd` plus a per-component `cost_breakdown_usd` (`input`, `output`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `web_search`) in the message usage (shown in the message info tooltip, persisted for analytics) and appends it to the `SHOW_TOKEN_COUNT` line (`💵 ≈$0.012`). Covers uncached input, output, 5m/1h cache writes, cache reads, fast mode, US data residency and web searches; models without a known rate card report nothing |
 | `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
 
 #### Search, files, and skills
@@ -229,6 +231,10 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.28`
+- Added an **estimated USD cost per turn** (new `SHOW_COST` user valve, on by default): reported as `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage — so it shows in the message info tooltip and is persisted for the analytics page — and appended to the `SHOW_TOKEN_COUNT` status line. Anthropic exposes no pricing through the API — `/v1/models` carries capabilities and limits only — so prices come from a built-in list-price table; admins can patch or extend it without a release via the new `MODEL_PRICING_OVERRIDES` valve
+- The estimate follows the actual bill: cache writes are split 5m/1h from `usage.cache_creation`, fast mode and US data residency are read from the response `usage` (not from the valves that requested them), and web searches are added at $10 per 1,000
+
 ### `v0.9.27`
 - Fixed a follow-up request failing with `tool use found without a corresponding tool_result block` after a turn with several Anthropic-hosted code-execution calls. The stored carriers interleave once server tools run in quick succession, and replaying them in document order separated a `server_tool_use` from its result. Results are now pulled forward so the pair stays adjacent (#40, by @JaWoDigiB)
 - Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)

@@ -47,6 +47,7 @@ STREAM_SOURCES = [
     ("response.code_execution_results", SRC_DIR / "response" / "code_execution_results.py"),
     ("response.web_tool_results", SRC_DIR / "response" / "web_tool_results.py"),
     ("response.internal_tool_results", SRC_DIR / "response" / "internal_tool_results.py"),
+    ("shared.pricing", SRC_DIR / "shared" / "pricing.py"),
 ]
 
 
