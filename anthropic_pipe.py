@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.33
+version: 0.9.34
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.34
+- Added an estimated USD cost per turn (new SHOW_COST user valve): reported as `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage, so it shows in the message info tooltip and is persisted for analytics, and appended to the SHOW_TOKEN_COUNT status line. Anthropic exposes no pricing via the API, so prices come from a built-in list-price table; admins can patch it without a release via the new MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes are split 5m/1h from usage.cache_creation, fast mode and US data residency are detected from the response usage, and web searches are added at $10 per 1,000
+- The price table covers the 5.5 generation: Opus 5.5 ($4 / $20, fast $8 / $40) and Sonnet 5.5 ($2 / $10) with their 0.05x cache reads, and Haiku 5.5's prompt-length tiers ($0.10 / $0.50 up to 100k prompt tokens, $0.50 / $2.50 above), decided per API call
+- Speed is priced per API call too, so a turn that falls back from fast to standard speed after a 429 is billed at fast rates only for the calls that actually ran fast
+
 v0.9.33
 - Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
 
@@ -3666,6 +3672,263 @@ async def handle_context_cleared_block_start(content_block: Any, ctx: Any) -> No
     logger.debug("Context cleared: type=%s, tokens=%s", cleared_type, cleared_tokens)
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
+class ModelPricing:
+    # Rate card in USD per million tokens, keyed by base (suffix-stripped) id.
+    # Source: platform.claude.com/docs/en/about-claude/pricing (verified
+    # 2026-10-08). The API does not expose pricing anywhere (/v1/models carries
+    # capabilities and limits only), so this table is the only source and the
+    # MODEL_PRICING_OVERRIDES valve is how admins patch it between releases.
+    #
+    # Only `input` and `output` are mandatory. The cache rates default to
+    # Anthropic's standard multipliers on the input price and are spelled out
+    # only where a model deviates. `fast_input` / `fast_output` are the
+    # fast-mode rates for the models that offer it.
+    #
+    # Models priced by prompt length add `long_context_threshold` plus
+    # `long_input` / `long_output` (cache rates again derive from
+    # `long_input`). A call whose full prompt -- uncached input, cache writes
+    # and cache reads -- exceeds the threshold bills ALL its tokens, output
+    # included, at the long rates.
+    RATES = {
+        # Cache reads on Fable/Mythos 5.1 are 0.025x instead of 0.1x.
+        "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+        "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+        "claude-fable-5": {"input": 10.0, "output": 50.0},
+        "claude-mythos-5": {"input": 10.0, "output": 50.0},
+        # Cache reads on Opus/Sonnet 5.5 are 0.05x instead of 0.1x.
+        "claude-opus-5-5": {
+            "input": 4.0,
+            "output": 20.0,
+            "cache_read": 0.20,
+            "fast_input": 8.0,
+            "fast_output": 40.0,
+        },
+        "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.10},
+        "claude-haiku-5-5": {
+            "input": 0.10,
+            "output": 0.50,
+            "long_context_threshold": 100_000,
+            "long_input": 0.50,
+            "long_output": 2.50,
+        },
+        "claude-opus-5": {"input": 5.0, "output": 25.0, "fast_input": 10.0, "fast_output": 50.0},
+        "claude-opus-4-8": {"input": 5.0, "output": 25.0, "fast_input": 10.0, "fast_output": 50.0},
+        "claude-opus-4-7": {"input": 5.0, "output": 25.0},
+        "claude-opus-4-6": {"input": 5.0, "output": 25.0},
+        "claude-opus-4-5": {"input": 5.0, "output": 25.0},
+        "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+        "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+        "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+        # Retired on the Claude API but still served by Bedrock / Google Cloud
+        # proxies. Haiku 3.5 is listed under both id orderings Anthropic used.
+        "claude-opus-4-1": {"input": 15.0, "output": 75.0},
+        "claude-opus-4": {"input": 15.0, "output": 75.0},
+        "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+        "claude-haiku-3-5": {"input": 0.8, "output": 4.0},
+        "claude-3-5-haiku": {"input": 0.8, "output": 4.0},
+    }
+
+    # Multipliers relative to the base input price.
+    CACHE_WRITE_5M_MULTIPLIER = 1.25
+    CACHE_WRITE_1H_MULTIPLIER = 2.0
+    CACHE_READ_MULTIPLIER = 0.1
+    # `inference_geo: "us"` applies to every token category.
+    US_RESIDENCY_MULTIPLIER = 1.1
+    # Web search is billed per request on top of tokens ($10 per 1,000).
+    # Web fetch and code execution alongside web tools are free.
+    WEB_SEARCH_REQUEST_USD = 0.01
+
+    RATE_KEYS = (
+        "input",
+        "output",
+        "cache_write_5m",
+        "cache_write_1h",
+        "cache_read",
+        "fast_input",
+        "fast_output",
+        "long_context_threshold",
+        "long_input",
+        "long_output",
+        "long_cache_write_5m",
+        "long_cache_write_1h",
+        "long_cache_read",
+    )
+
+    # Token categories of one API call, as recorded in `_call_log`.
+    TOKEN_KEYS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
+
+    def __init__(self, overrides_json: str = ""):
+        self._overrides = self._parse_overrides(overrides_json)
+
+    @classmethod
+    def _parse_overrides(cls, raw: str) -> dict:
+        raw = (raw or "").strip()
+        if not raw:
+            return {}
+        try:
+            overrides = json.loads(raw)
+            if not isinstance(overrides, dict):
+                raise ValueError("top level must be an object keyed by model id")
+            parsed: dict = {}
+            for model_id, patch in overrides.items():
+                if not isinstance(patch, dict):
+                    raise ValueError(f"{model_id!r}: expected an object of rates")
+                parsed[model_id] = {
+                    k: float(v) for k, v in patch.items() if k in cls.RATE_KEYS and v is not None
+                }
+            return parsed
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Ignoring MODEL_PRICING_OVERRIDES: {e}")
+            return {}
+
+    @staticmethod
+    def _normalize(model_name: str) -> str:
+        # Endpoints without aliases hand out dated ids ("claude-opus-5-20260301").
+        # Same rule as Pipe._normalize_model_name; duplicated because this class
+        # is a module-level section compiled above `class Pipe`.
+        return re.sub(r"-\d{8}$", "", model_name)
+
+    def rates_for(self, model_name: str) -> Optional[dict]:
+        normalized = self._normalize(model_name)
+        base = self.RATES.get(model_name) or self.RATES.get(normalized)
+        rates: dict = dict(base) if base else {}
+        patch = self._overrides.get(model_name) or self._overrides.get(normalized)
+        if patch:
+            rates.update(patch)
+
+        if "input" not in rates or "output" not in rates:
+            return None
+        self._derive_cache_rates(rates, "")
+        if rates.get("long_context_threshold") and "long_input" in rates and "long_output" in rates:
+            self._derive_cache_rates(rates, "long_")
+        else:
+            for key in [k for k in rates if k.startswith("long_")]:
+                del rates[key]
+        return rates
+
+    @classmethod
+    def _derive_cache_rates(cls, rates: dict, prefix: str) -> None:
+        base = rates[f"{prefix}input"]
+        rates.setdefault(f"{prefix}cache_write_5m", base * cls.CACHE_WRITE_5M_MULTIPLIER)
+        rates.setdefault(f"{prefix}cache_write_1h", base * cls.CACHE_WRITE_1H_MULTIPLIER)
+        rates.setdefault(f"{prefix}cache_read", base * cls.CACHE_READ_MULTIPLIER)
+
+    @staticmethod
+    def record_call(
+        total_usage: dict,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_write_5m: int,
+        cache_write_1h: int,
+        cache_read: int,
+    ) -> None:
+        total_usage.setdefault("_call_log", []).append(
+            {
+                "prompt": input_tokens + cache_write_5m + cache_write_1h + cache_read,
+                "input": input_tokens,
+                "output": output_tokens,
+                "cache_write_5m": cache_write_5m,
+                "cache_write_1h": cache_write_1h,
+                "cache_read": cache_read,
+            }
+        )
+
+    @staticmethod
+    def update_call_output(total_usage: dict, output_tokens: int) -> None:
+        call_log = total_usage.get("_call_log")
+        if call_log:
+            call_log[-1]["output"] = output_tokens
+
+    @staticmethod
+    def record_billing_modifiers(usage: Any, total_usage: dict) -> None:
+        if not usage:
+            return
+        if getattr(usage, "speed", None) == "fast":
+            call_log = total_usage.get("_call_log")
+            if call_log:
+                call_log[-1]["fast"] = True
+        if getattr(usage, "inference_geo", None) == "us":
+            total_usage["_geo_us"] = 1
+
+    def _call_rates(self, rates: dict, *, fast: bool, long: bool) -> dict:
+        prefix = "long_" if long else ""
+        call_rates = {key: rates[f"{prefix}{key}"] for key in self.TOKEN_KEYS}
+        if fast and "fast_input" in rates and "fast_output" in rates:
+            input_scale = rates["fast_input"] / rates["input"] if rates["input"] else 1.0
+            output_scale = rates["fast_output"] / rates["output"] if rates["output"] else 1.0
+            call_rates = {
+                key: rate * (output_scale if key == "output" else input_scale)
+                for key, rate in call_rates.items()
+            }
+        return call_rates
+
+    def breakdown(self, model_name: str, total_usage: dict) -> Optional[dict]:
+        rates = self.rates_for(model_name)
+        if not rates:
+            return None
+
+        # Cache writes split by TTL when the API reported the breakdown; the
+        # undifferentiated counter is the fallback for endpoints that do not.
+        write_5m = total_usage.get("_cache_write_5m", 0)
+        write_1h = total_usage.get("_cache_write_1h", 0)
+        if not write_5m and not write_1h:
+            write_5m = total_usage.get("cache_creation_input_tokens", 0)
+
+        tokens = {
+            "input": total_usage.get("input_tokens", 0),
+            "output": total_usage.get("output_tokens", 0),
+            "cache_write_5m": write_5m,
+            "cache_write_1h": write_1h,
+            "cache_read": total_usage.get("cache_read_input_tokens", 0),
+        }
+
+        # The aggregates stay the source of truth for the totals; the call log
+        # only identifies the calls billed at a non-standard rate (fast, or
+        # over the prompt-length threshold). Whatever it does not claim is
+        # billed at the standard rates.
+        token_components = dict.fromkeys(self.TOKEN_KEYS, 0.0)
+        claimed = dict.fromkeys(self.TOKEN_KEYS, 0)
+        threshold = rates.get("long_context_threshold")
+        for call in total_usage.get("_call_log", ()):
+            fast = bool(call.get("fast"))
+            long = bool(threshold) and call.get("prompt", 0) > threshold
+            if not fast and not long:
+                continue
+            call_rates = self._call_rates(rates, fast=fast, long=long)
+            for key in self.TOKEN_KEYS:
+                token_components[key] += call.get(key, 0) * call_rates[key]
+                claimed[key] += call.get(key, 0)
+        standard = self._call_rates(rates, fast=False, long=False)
+        for key in self.TOKEN_KEYS:
+            token_components[key] += max(tokens[key] - claimed[key], 0) * standard[key]
+
+        geo = self.US_RESIDENCY_MULTIPLIER if total_usage.get("_geo_us") else 1.0
+        components = {
+            name: amount * geo / 1_000_000 for name, amount in token_components.items()
+        }
+        components["web_search"] = (
+            total_usage.get("_web_search_requests", 0) * self.WEB_SEARCH_REQUEST_USD
+        )
+        return {name: round(amount, 6) for name, amount in components.items() if amount}
+
+    def estimate(self, model_name: str, total_usage: dict) -> Optional[float]:
+        components = self.breakdown(model_name, total_usage)
+        if components is None:
+            return None
+        return round(sum(components.values()), 6)
+
+    @staticmethod
+    def format_usd(cost: float) -> str:
+        if cost >= 1:
+            return f"${cost:.2f}"
+        if cost >= 0.01:
+            return f"${cost:.3f}"
+        return f"${cost:.4f}"
+# END GENERATED SECTION: anthropic_pipe.shared.pricing
+
 class Pipe:
     API_VERSION = "2023-06-01"  # Current API version as of May 2025
     _DEFAULT_API_BASE = "https://api.anthropic.com"
@@ -4078,6 +4341,18 @@ class Pipe:
             "Changing the API key, base URL, workspace or ENABLED_MODELS always "
             "refreshes immediately, regardless of this setting.",
         )
+        MODEL_PRICING_OVERRIDES: str = Field(
+            default="",
+            description="JSON patch for the built-in price table used by the SHOW_COST estimate, in USD per "
+            "million tokens, keyed by model id. Keys: input, output, cache_write_5m, cache_write_1h, "
+            "cache_read, fast_input, fast_output; omitted cache rates derive from `input` at Anthropic's "
+            "standard multipliers (1.25x / 2x / 0.1x). Prompt-length pricing (Haiku 5.5): "
+            "long_context_threshold plus long_input / long_output (long_cache_* optional), applied to every "
+            "API call whose prompt exceeds the threshold. Example: "
+            '{"claude-sonnet-5": {"input": 3, "output": 15}, "my-proxy-model": {"input": 1, "output": 5}}. '
+            "Anthropic does not publish prices through the API, so this is how to track price changes "
+            "or a negotiated rate without waiting for a pipe release.",
+        )
 
     class UserValves(BaseModel):
         ANTHROPIC_API_KEY: EncryptedStr = Field(
@@ -4146,6 +4421,15 @@ class Pipe:
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
+        )
+        SHOW_COST: bool = Field(
+            default=True,
+            description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
+            "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
+            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
+            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
+            "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
         )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,
@@ -8355,6 +8639,10 @@ class Pipe:
         info.update(overrides)
         return info
 
+    def _model_pricing(self) -> "ModelPricing":
+        """Rate card for this pipe, with the admin's MODEL_PRICING_OVERRIDES applied."""
+        return ModelPricing(getattr(self.valves, "MODEL_PRICING_OVERRIDES", "") or "")
+
     def _model_cache_signature(self) -> str:
         """Fingerprint of the settings the model list depends on.
 
@@ -8921,6 +9209,21 @@ class Pipe:
             # continuations (server tools such as web_search) and retries.
             total_usage["cache_creation_input_tokens"] += cache_creation_input_tokens
             total_usage["cache_read_input_tokens"] += cache_read_input_tokens
+            # 5m and 1h writes are billed at 1.25x and 2x respectively, so the
+            # cost estimate needs the split. The API reports it in
+            # `cache_creation`; without it, attribute the whole write to the
+            # configured TTL (loses precision only when the tools/system TTL
+            # differs from the messages TTL).
+            breakdown = getattr(usage, "cache_creation", None)
+            write_5m = getattr(breakdown, "ephemeral_5m_input_tokens", None) if breakdown else None
+            write_1h = getattr(breakdown, "ephemeral_1h_input_tokens", None) if breakdown else None
+            if write_5m is None and write_1h is None:
+                if self.valves.CACHE_TTL == "1 hour":
+                    write_1h = cache_creation_input_tokens
+                else:
+                    write_5m = cache_creation_input_tokens
+            total_usage["_cache_write_5m"] = total_usage.get("_cache_write_5m", 0) + (write_5m or 0)
+            total_usage["_cache_write_1h"] = total_usage.get("_cache_write_1h", 0) + (write_1h or 0)
             logger.debug(
                 f" Usage stats: input={input_tokens}, output={current_output_tokens}, "
                 f"cache_creation={cache_creation_input_tokens}, cache_read={cache_read_input_tokens}"
@@ -8928,9 +9231,19 @@ class Pipe:
         else:
             cache_creation_input_tokens = 0
             cache_read_input_tokens = 0
+            write_5m = write_1h = 0
             logger.debug(f" Usage stats: input={input_tokens}, output={current_output_tokens}")
 
         total_usage["_calls"] = total_usage.get("_calls", 0) + 1
+        ModelPricing.record_call(
+            total_usage,
+            input_tokens=input_tokens or 0,
+            output_tokens=current_output_tokens or 0,
+            cache_write_5m=write_5m or 0,
+            cache_write_1h=write_1h or 0,
+            cache_read=cache_read_input_tokens,
+        )
+        ModelPricing.record_billing_modifiers(usage, total_usage)
 
         # Two different questions, deliberately kept apart:
         #
@@ -9785,6 +10098,7 @@ class Pipe:
                 tool_loop_iteration += 1
                 # Reset per-iteration state
                 stream_output_tokens = 0
+                stream_web_search_requests = 0
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -9932,6 +10246,21 @@ class Pipe:
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
                                         )
+                                        # Web searches are billed per request
+                                        # ($10/1k). Like output_tokens, the
+                                        # count is cumulative within one API
+                                        # call, so accumulate the delta.
+                                        server_tool_use = getattr(usage, "server_tool_use", None)
+                                        current_searches = (
+                                            getattr(server_tool_use, "web_search_requests", 0) or 0
+                                        ) if server_tool_use else 0
+                                        total_usage["_web_search_requests"] = (
+                                            total_usage.get("_web_search_requests", 0)
+                                            + (current_searches - stream_web_search_requests)
+                                        )
+                                        stream_web_search_requests = current_searches
+                                        ModelPricing.record_billing_modifiers(usage, total_usage)
+                                        ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)
                                 if code_execution_container_id:
@@ -10678,6 +11007,17 @@ class Pipe:
         # ---------------------------------------------------------
 
         final_status = "✅ Response Complete"
+        # ============ Cost Estimate ============
+        # Stored as public keys so they travel with the usage dict: OpenWebUI
+        # renders every key of `message.usage` in the message info tooltip and
+        # persists the dict for the analytics page. Absent (not 0) for models
+        # with no known rate card.
+        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+            cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
+            if cost_breakdown is not None:
+                total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
+                total_usage["cost_breakdown_usd"] = cost_breakdown
+
         # ============ Token Count Display ============
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
         if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
@@ -10731,6 +11071,11 @@ class Pipe:
                 # me": the share of billed input served from cache at 0.1x.
                 if billed_input:
                     final_status += f" | ⚡ {cache_read / billed_input * 100:.0f}% cached"
+
+            # Estimated list-price cost of the whole turn (all calls). Silently
+            # absent for models with no known rate card rather than showing $0.
+            if "cost_usd" in total_usage:
+                final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
 
         # Consolidate: emit a final replace with the complete message so OpenWebUI
         # has the authoritative content (replaces any partial delta/replace state).
