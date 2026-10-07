@@ -24,6 +24,21 @@ class PipeStreamRuntimeSupportMethods:
         request_id = getattr(message, "id", None)
         logger.debug(f" Message started with ID: {request_id}")
 
+        # thinking-binding-controls beta: replayed thinking blocks the API
+        # dropped. prefix_binding_mismatch means our request prefix changed
+        # since the block was produced (the model answers without that
+        # reasoning and the cache restarts at the edit) - worth a warning.
+        transformations = getattr(message, "input_transformations", None) or []
+        if transformations:
+            reasons: dict[str, int] = {}
+            for entry in transformations:
+                reason = getattr(entry, "reason", None)
+                if reason is None and isinstance(entry, dict):
+                    reason = entry.get("reason")
+                reasons[str(reason)] = reasons.get(str(reason), 0) + 1
+            level = logging.WARNING if "prefix_binding_mismatch" in reasons else logging.INFO
+            logger.log(level, f"API dropped {len(transformations)} replayed thinking block(s): {reasons}")
+
         if not include_usage or total_usage is None:
             return stream_output_tokens
 
@@ -258,7 +273,14 @@ class PipeStreamRuntimeSupportMethods:
             ):
                 conversation_ended = True
                 if sdk_stop == "max_tokens":
-                    await request_ctx.emit_delta("\n\n⚠️ Maximum token limit reached.")
+                    # Same wording as the streaming path: this is the per-call
+                    # output ceiling, not the context window.
+                    _cap = payload_for_stream.get("max_tokens")
+                    await request_ctx.emit_delta(
+                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                        + ". This is not the context window — raise max_tokens for this model."
+                    )
                 elif sdk_stop == "model_context_window_exceeded":
                     await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":

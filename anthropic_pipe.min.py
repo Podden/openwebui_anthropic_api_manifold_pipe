@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.27
+version: 0.9.31
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -33,11 +33,48 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5 / 4.8
+- Fast Mode for Opus 5.5 / 5 / 4.8
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.31
+- Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max
+- Sonnet 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now sends its lowest setting thinking:{"type":"between_tools"} there (no up-front thinking; notes between tool calls still arrive as thinking blocks). Like the Opus 5 disable, it is capped at effort 'high'
+- Sonnet 5.5 rejects forced tool_choice ("tool" / "any"): degraded to "auto", same as Opus 5.5 / Fable 5.1
+- Advisor pairs for a Sonnet 5.5 executor: Opus 5.5, Opus 5, Sonnet 5.5, Fable 5 / 5.1, Mythos 5 / 5.1. Opus 5.5 is now selectable as ADVISOR_MODEL
+- The drop_block retry for changed prompt prefixes is skipped for between_tools requests, which accept no other thinking field
+- Sonnet 5.5 added to REFUSAL_FALLBACK and MEMORY_REVIEW_MODEL
+- Added Claude Haiku 5.5 (claude-haiku-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max. Thinking off sends thinking:{"type":"disabled"} (capped at effort 'high'); forced tool_choice keeps working
+- Haiku 5.5 has no server-side refusal fallback (a pinned fallback model 400s), so REFUSAL_FALLBACK is skipped for it
+- Advisor pairs for a Haiku 5.5 executor: Opus 5.5 / 5 / 4.8 / 4.7, Fable 5 / 5.1, Mythos 5 / 5.1, Sonnet 5.5 / 5, Haiku 5.5
+- Haiku 5.5 added to MEMORY_REVIEW_MODEL and is now its default (about a tenth of Haiku 4.5's price)
+
+v0.9.30
+- Added Claude Opus 5.5 (claude-opus-5-5): 1M context, 128k output, always-on adaptive thinking, full effort ladder incl. max, fast mode
+- Opus 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now lowers effort to 'low' there instead of disabling thinking
+- Opus 5.5 rejects forced tool_choice ("tool" / "any"), same handling as Fable 5.1: degraded to "auto"
+- thinking.block_binding "drop_block" is no longer sent up front. On accounts created before 2026-08-31 it opted every request in to the prefix check and dropped thinking blocks the model could otherwise still read. Newer accounts get a 400 for a changed prefix instead; the pipe now retries that request once with drop_block, so the turn still goes through
+- THINKING_DISPLAY 'updates' also covers Opus 5.5, where the notes between tool calls arrive as thinking blocks and stay empty at 'omitted'. Its beta header is now sent whenever 'updates' is used
+- Opus 5.5 is not a valid advisor pair yet: the advisor tool is skipped on that executor instead of 400ing
+
+v0.9.29
+- Added Claude Fable 5.1 / Mythos 5.1 to the capability overrides, output/context fallbacks and the advisor model list (128k output, 1M context, adaptive thinking, compaction, structured outputs)
+- tool_choice "tool"/"any" is no longer sent to models that reject it: Fable 5.1 and Mythos 5.1 return a 400 for forced tool use, so web-search enforcement and forced tool_choice from the request body degrade to "auto" on them (logged) instead of failing the request
+- Thinking blocks replayed to Fable 5.1 are bound to the request prefix (system, tools, earlier messages). OpenWebUI changes that prefix between turns (memory/RAG appendix, tool toggles, context compaction summary), so the pipe now sends thinking.block_binding.prefix_mismatch_behavior "drop_block" (beta thinking-binding-controls-2026-08-01) and logs the input_transformations the API reports instead of surfacing a 400
+- THINKING_DISPLAY accepts "updates" (beta thinking-display-updates-2026-08-18): reasoning stays hidden, the one-line progress updates Fable 5 / 5.1 write before a tool call are shown as thinking text
+- ENABLE_COMPACTION steps aside when OpenWebUI's own Context Compaction (0.11.3+, Admin > Interface) has already summarized the chat: its "[CONVERSATION SUMMARY]" marker in the system prompt disables the API-side compaction for that request, so the two never run on the same conversation. The valve description says so
+
+v0.9.28
+- Fixed every tool being deferred for tool search regardless of the exclude list: TOOL_SEARCH_EXCLUDE_TOOLS is a List[str], but its default shipped as a single multi-line comma-separated blob inside a one-element list, so the `name not in excludes` test never matched anything. Anthropic server tools and even the tool_search tool itself were deferred. On endpoints that do not implement deferred loading (litellm/Bedrock and other proxies) this produced a hard 400, "tool_use ids were found without tool_result blocks" (#44, reported by @icsy7867)
+- TOOL_SEARCH_EXCLUDE_TOOLS is now a multiselect with a real list default; comma-separated and legacy blob values still load
+- Raised the max_tokens fallback for unrecognised model ids from 4096 to 64000. Proxies that rename models (litellm/Bedrock ids such as "us.anthropic.claude-sonnet-5-v1:0") miss the lookup table and landed on a ceiling every current Claude far exceeds, truncating long answers (#43, reported by @icsy7867)
+- The truncation notice no longer says "Claude has Reached the maximum token limit!". That reads as a full context window and sent people auditing their conversation; it now names the actual output limit and its value
+- Fixed a truncated answer being retried up to MAX_RETRIES times: stop_reason "max_tokens" did not end the turn, so it fell through to the truncated-stream retry and replayed the whole request, each attempt stopping at the same ceiling and each one billed
+- Non-streaming requests that carry their own `tools` in the body now return a real OpenAI `tool_calls` array with finish_reason "tool_calls" instead of the arguments serialized into message.content with finish_reason "stop". Callers that read message.tool_calls (generate_chat_completion consumers, sub-agent tools) saw a tool call as prose and stopped after one iteration. Streaming behaviour is unchanged (#35, reported by @kdo-jl)
+- Tools passed in body.tools are no longer deferred for tool search. The caller runs them itself, so making the model look them up first only added an API round trip before it could answer (#35)
+- Added a Fast Mode toggle filter (anthropic_pipe_fast_toggle.py) for per-message fast requests on Opus 5 / 4.8, next to the existing admin valve. Speed against depth is a per-request trade; the toggle is ignored on models without fast mode rather than failing the request (#50, requested by @Willian-Zhang)
+
 v0.9.27
 - Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
 - Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
@@ -627,6 +664,63 @@ HIDDEN_BLOCKS: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
     "anthropic_pipe_hidden_blocks", default=frozenset()
 )
 
+ANTHROPIC_SERVER_TOOL_NAMES = [
+    "web_search",
+    "web_fetch",
+    "code_execution",
+    "bash_code_execution",
+    "text_editor_code_execution",
+    "tool_search_tool_regex",
+    "tool_search_tool_bm25",
+    "advisor",
+    "mcp_toolset",
+    "memory",
+    "bash",
+    "str_replace_based_edit_tool",
+    "computer",
+]
+
+OPENWEBUI_BUILTIN_TOOL_NAMES = [
+    "add_memory", "ask_user", "calculate_timestamp", "create_automation",
+    "create_calendar_event", "create_tasks", "delegate_task",
+    "delete_automation", "delete_calendar_event", "delete_memory",
+    "edit_image", "execute_code", "fetch_url", "generate_image",
+    "get_current_timestamp", "grep_chat_files", "grep_knowledge_files",
+    "list_automations", "list_chat_files", "list_knowledge",
+    "list_knowledge_bases", "list_memories", "list_memory_paths",
+    "notify", "query_chat_files", "query_knowledge_bases",
+    "query_knowledge_files", "read_memory_path", "replace_memory_content",
+    "replace_note_content", "search_calendar_events",
+    "search_channel_messages", "search_channels", "search_chats",
+    "search_knowledge_bases", "search_knowledge_files", "search_memories",
+    "search_notes", "search_web", "timer", "toggle_automation",
+    "update_automation", "update_calendar_event", "update_memory",
+    "update_task", "view_channel_message", "view_channel_thread",
+    "view_chat", "view_file", "view_knowledge_file", "view_note",
+    "view_skill", "write_note",
+
+    "kb_exec",
+    "display_file", "get_process_status", "glob_search", "grep_search",
+    "kill_process", "list_files", "list_processes", "read_file",
+    "replace_file_content", "run_command", "send_process_input",
+    "write_file",
+]
+
+DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
+    ANTHROPIC_SERVER_TOOL_NAMES + OPENWEBUI_BUILTIN_TOOL_NAMES
+)
+
+def normalize_tool_name_list(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {
+        name.strip()
+        for item in items
+        for name in str(item).split(",")
+        if name.strip()
+    }
+
 SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "anthropic_pipe_slim_output", default=False
 )
@@ -869,6 +963,10 @@ class ToolUseState:
     progress_blocks: dict[str, str] = field(default_factory=dict)
     api_passthrough: bool = False
 
+    passthrough_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    text_before_passthrough: Optional[str] = None
+
     def reset_for_iteration(self) -> None:
         self.running_tasks = []
         self.progress_blocks = {}
@@ -1052,7 +1150,10 @@ async def create_request_payload(
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    fast_requested = pipe.valves.ENABLE_FAST_MODE or (__metadata__ or {}).get(
+        "anthropic_fast", False
+    )
+    if fast_requested and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
 
@@ -1080,6 +1181,16 @@ async def create_request_payload(
     enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
         "anthropic_thinking", False
     )
+    if not enable_thinking and model_info.get("thinking_always_on"):
+
+        if effort_config is not None:
+            logger.debug(
+                f"Thinking can't be disabled on {actual_model_name}: "
+                f"effort '{effective_effort}' -> 'low'"
+            )
+            effective_effort = "low"
+            effort_config = {"effort": "low"}
+        enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
 
         if model_info["supports_adaptive_thinking"]:
@@ -1110,17 +1221,18 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized"):
+        if thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
 
         payload["thinking"] = thinking_config
     elif model_info.get("thinking_on_by_default"):
 
-        payload["thinking"] = {"type": "disabled"}
+        off_type = model_info.get("thinking_off_type", "disabled")
+        payload["thinking"] = {"type": off_type}
         if effective_effort in ("xhigh", "max"):
             logger.info(
-                f"Thinking disabled on {actual_model_name}: effort "
-                f"'{effective_effort}' is incompatible with thinking:disabled, "
+                f"Thinking off on {actual_model_name}: effort "
+                f"'{effective_effort}' is incompatible with thinking:{off_type}, "
                 "clamping to 'high'"
             )
             effective_effort = "high"
@@ -1447,7 +1559,18 @@ async def create_request_payload(
         if context_management:
             payload["context_management"] = {"edits": context_management}
 
-    if __user__["valves"].ENABLE_COMPACTION and model_info.get("supports_compaction", False):
+    owui_compacted = any(
+        isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
+        for _b in (system_messages or [])
+    )
+    if owui_compacted and __user__["valves"].ENABLE_COMPACTION:
+        logger.info("OpenWebUI context compaction detected - skipping API-side compaction for this request")
+
+    if (
+        __user__["valves"].ENABLE_COMPACTION
+        and not owui_compacted
+        and model_info.get("supports_compaction", False)
+    ):
         if "context-management-2025-06-27" not in beta_headers:
             beta_headers.append("context-management-2025-06-27")
         beta_headers.append("compact-2026-01-12")
@@ -1473,8 +1596,15 @@ async def create_request_payload(
     if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
         beta_headers.append("fast-mode-2026-02-01")
 
+    if (payload.get("thinking") or {}).get("display") == "updates":
+        beta_headers.append("thinking-display-updates-2026-08-18")
+
     fallback_mode = getattr(pipe.valves, "REFUSAL_FALLBACK", "off")
-    if fallback_mode != "off" and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE:
+    if (
+        fallback_mode != "off"
+        and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE
+        and model_info.get("supports_refusal_fallback", True)
+    ):
         beta_headers.append("server-side-fallback-2026-07-01")
 
         _fallbacks = (
@@ -1529,7 +1659,12 @@ async def create_request_payload(
 
             has_web_search = any(t.get("name") == "web_search" for t in tools_list)
             if has_web_search:
-                if "thinking" not in payload:
+                if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
+                    payload["tool_choice"] = {"type": "auto"}
+                    logger.info(
+                        f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
+                    )
+                elif "thinking" not in payload:
 
                     payload["tool_choice"] = {"type": "tool", "name": "web_search"}
                     logger.debug("Enforcing web_search via tool_choice")
@@ -1558,6 +1693,15 @@ async def create_request_payload(
         else:
 
             payload["tool_choice"] = api_tc
+        if (
+            isinstance(payload["tool_choice"], dict)
+            and payload["tool_choice"].get("type") in ("tool", "any")
+            and not model_info.get("supports_forced_tool_choice", True)
+        ):
+            logger.info(
+                f"{actual_model_name} rejects tool_choice {payload['tool_choice']} - degrading to auto"
+            )
+            payload["tool_choice"] = {"type": "auto"}
         logger.debug(f"API tool_choice passthrough: {payload['tool_choice']}")
 
     _reserved_server_tool_names = {
@@ -2255,6 +2399,22 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
             logger.info(
                 "🔄 API tool passthrough for '%s': returning tool input as response",
                 tool_name,
+            )
+
+            if tool_use.text_before_passthrough is None:
+                tool_use.text_before_passthrough = ctx.text()
+            tool_use.passthrough_calls.append(
+                {
+                    "id": tool_call_data.get("id") or tool_use.tool_id_at_start,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            tool_input if isinstance(tool_input, dict) else {},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
             )
             await emit_delta(json.dumps(tool_input, ensure_ascii=False))
             tool_use.api_passthrough = True
@@ -3000,6 +3160,8 @@ class Pipe:
     _DEFAULT_API_BASE = "https://api.anthropic.com"
 
     MODEL_MAX_TOKENS_FALLBACK = {
+        "claude-opus-5-5": 128000,
+        "claude-sonnet-5-5": 128000,
         "claude-opus-5": 128000,
         "claude-opus-4-8": 128000,
         "claude-opus-4-7": 128000,
@@ -3010,22 +3172,45 @@ class Pipe:
         "claude-sonnet-4-5": 64000,
         "claude-fable-5": 128000,
         "claude-mythos-5": 128000,
+        "claude-fable-5-1": 128000,
+        "claude-mythos-5-1": 128000,
+        "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
 
     MODEL_CONTEXT_LENGTH_FALLBACK = {
+        "claude-opus-5-5": 1000000,
+        "claude-sonnet-5-5": 1000000,
         "claude-opus-5": 1000000,
         "claude-sonnet-5": 1000000,
         "claude-fable-5": 1000000,
         "claude-mythos-5": 1000000,
+        "claude-fable-5-1": 1000000,
+        "claude-mythos-5-1": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
         "claude-sonnet-4-6": 1000000,
         "claude-sonnet-4-5": 1000000,
+        "claude-haiku-5-5": 1000000,
     }
 
     MODEL_CAPABILITY_OVERRIDES = {
+
+        "claude-fable-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
+        "claude-mythos-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
@@ -3049,6 +3234,21 @@ class Pipe:
         "claude-sonnet-4-5": {
             "supports_structured_outputs": True,
         },
+        "claude-opus-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+
+            "thinking_always_on": True,
+
+            "supports_forced_tool_choice": False,
+        },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
@@ -3058,12 +3258,41 @@ class Pipe:
 
             "thinking_on_by_default": True,
         },
+        "claude-sonnet-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_on_by_default": True,
+
+            "thinking_off_type": "between_tools",
+
+            "supports_forced_tool_choice": False,
+        },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "thinking_on_by_default": True,
+        },
+        "claude-haiku-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+
+            "thinking_on_by_default": True,
+
+            "supports_refusal_fallback": False,
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
@@ -3130,13 +3359,15 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
             "default",
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ] = Field(
@@ -3145,7 +3376,8 @@ class Pipe:
                 "Retry server-side on another model when the safety classifier refuses a "
                 "request, instead of returning the refusal. 'default' lets Anthropic pick the "
                 "recommended model per refusal category; picking a model pins that one. "
-                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints."
+                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints and "
+                "for Haiku 5.5, which has no server-side fallback."
             ),
         )
         ENABLE_INTERLEAVED_THINKING: bool = Field(
@@ -3196,12 +3428,15 @@ class Pipe:
         )
         MEMORY_REVIEW_MODEL: Literal[
             "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-opus-4-8",
             "claude-opus-5",
+            "claude-opus-5-5",
             "same as chat model",
         ] = Field(
-            default="claude-haiku-4-5",
+            default="claude-haiku-5-5",
             description=(
                 "Model used for OpenWebUI's background memory review "
                 "(ENABLE_MEMORY_BACKGROUND_REVIEW). OpenWebUI runs that review on the "
@@ -3297,9 +3532,9 @@ class Pipe:
             le=64000,
             description="Thinking budget tokens",
         )
-        THINKING_DISPLAY: Literal["summarized", "omitted"] = Field(
+        THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
-            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text.",
+            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text, 'updates' (beta) hides reasoning but shows the short progress updates Fable 5 / 5.1, Opus 5.5 and Sonnet 5.5 write before each tool call.",
         )
         EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = Field(
             default="high",
@@ -3389,44 +3624,13 @@ class Pipe:
             description="Tools with longer JSON definitions characters will be deferred.",
         )
         TOOL_SEARCH_EXCLUDE_TOOLS: List[str] = Field(
-            default=["""
-            web_search,web_fetch,code_execution,
-            bash_code_execution,
-            text_editor_code_execution,
-            tool_search_tool_regex,
-            tool_search_tool_bm25,
-
-            advisor,
-            mcp_toolset,
-
-            memory,
-            bash,
-            str_replace_based_edit_tool,
-            computer,
-             add_memory, ask_user, calculate_timestamp, create_automation,
-            create_calendar_event, create_tasks, delegate_task,
-            delete_automation, delete_calendar_event, delete_memory,
-            edit_image, execute_code, fetch_url, generate_image,
-            get_current_timestamp, grep_chat_files, grep_knowledge_files,
-            list_automations, list_chat_files, list_knowledge,
-            list_knowledge_bases, list_memories, list_memory_paths,
-            notify, query_chat_files, query_knowledge_bases,
-            query_knowledge_files, read_memory_path, replace_memory_content,
-            replace_note_content, search_calendar_events,
-            search_channel_messages, search_channels, search_chats,
-            search_knowledge_bases, search_knowledge_files, search_memories,
-            search_notes, search_web, timer, toggle_automation,
-            update_automation, update_calendar_event, update_memory,
-            update_task, view_channel_message, view_channel_thread,
-            view_chat, view_file, view_knowledge_file, view_note,
-            view_skill, write_note,
-
-            kb_exec,
-
-            display_file, get_process_status, glob_search, grep_search,
-            kill_process, list_files, list_processes, read_file,
-            replace_file_content, run_command, send_process_input,
-            write_file"""],
+            default=list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+            json_schema_extra={
+                "input": {
+                    "type": "multiselect",
+                    "options": list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+                }
+            },
             description="Excluded Tools are always loaded. Anthropic tools and OpenWebUI-native tools (builtin + Open Terminal) are excluded by default.",
         )
 
@@ -3434,7 +3638,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-mythos-5"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )
@@ -3459,7 +3663,7 @@ class Pipe:
         )
         ENABLE_COMPACTION: bool = Field(
             default=False,
-            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens.",
+            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens. If OpenWebUI's own Context Compaction (Admin > Interface) is enabled, it runs first and wins: the pipe detects its summary and does not compact a second time. Turn one of the two off; both at once is wasted work.",
         )
         COMPACTION_TRIGGER_TOKENS: int = Field(
             default=50000,
@@ -4900,13 +5104,24 @@ class Pipe:
             tool_names_seen.add("web_fetch")
             logger.debug(f"Added web_fetch tool: {web_fetch_type}")
 
-        if __user__["valves"].ENABLE_ADVISOR_TOOL:
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and actual_model_name == "claude-opus-5-5":
+            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
+        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
             executor_model = actual_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
             valid_advisors = {
                 "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-haiku-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+                ],
                 "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                ],
                 "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
                 "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
                 "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
@@ -5011,15 +5226,18 @@ class Pipe:
             is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
 
         _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
+        user_excludes = normalize_tool_name_list(
+            __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
+        )
 
         for claude_tool in claude_tools:
 
             if _defer_active:
 
                 name = claude_tool["name"]
-                user_excludes = __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
                 if (
-                    name != forced_tool_name
+                    name not in api_tool_names
+                    and name != forced_tool_name
                     and name not in user_excludes
                 ):
 
@@ -6595,6 +6813,10 @@ class Pipe:
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+
+            "supports_forced_tool_choice": True,
+
+            "supports_refusal_fallback": True,
         }
 
         model_id = model.id if hasattr(model, "id") else ""
@@ -6613,8 +6835,9 @@ class Pipe:
             return cls._api_capabilities_cache[normalized]
 
         info = {
+
             "max_tokens": cls.MODEL_MAX_TOKENS_FALLBACK.get(model_name)
-            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 4096),
+            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 64000),
             "context_length": cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(model_name)
             or cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(normalized, 200000),
             "supports_thinking": True,
@@ -6630,6 +6853,8 @@ class Pipe:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+            "supports_forced_tool_choice": True,
+            "supports_refusal_fallback": True,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:
@@ -7018,6 +7243,17 @@ class Pipe:
         request_id = getattr(message, "id", None)
         logger.debug(f" Message started with ID: {request_id}")
 
+        transformations = getattr(message, "input_transformations", None) or []
+        if transformations:
+            reasons: dict[str, int] = {}
+            for entry in transformations:
+                reason = getattr(entry, "reason", None)
+                if reason is None and isinstance(entry, dict):
+                    reason = entry.get("reason")
+                reasons[str(reason)] = reasons.get(str(reason), 0) + 1
+            level = logging.WARNING if "prefix_binding_mismatch" in reasons else logging.INFO
+            logger.log(level, f"API dropped {len(transformations)} replayed thinking block(s): {reasons}")
+
         if not include_usage or total_usage is None:
             return stream_output_tokens
 
@@ -7205,7 +7441,13 @@ class Pipe:
             ):
                 conversation_ended = True
                 if sdk_stop == "max_tokens":
-                    await request_ctx.emit_delta("\n\n⚠️ Maximum token limit reached.")
+
+                    _cap = payload_for_stream.get("max_tokens")
+                    await request_ctx.emit_delta(
+                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                        + ". This is not the context window — raise max_tokens for this model."
+                    )
                 elif sdk_stop == "model_context_window_exceeded":
                     await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":
@@ -8029,7 +8271,15 @@ class Pipe:
                                     tool_use_state.reset_for_iteration()
                                     has_pending_tool_calls = True
                                 elif stop_reason == "max_tokens":
-                                    text_state.chunk += "Claude has Reached the maximum token limit!"
+
+                                    _cap = payload_for_stream.get("max_tokens")
+                                    text_state.chunk += (
+                                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                                        + ". This is not the context window — raise max_tokens for this model."
+                                    )
+
+                                    conversation_ended = True
                                 elif stop_reason == "end_turn":
                                     conversation_ended = True
                                 elif stop_reason == "pause_turn":
@@ -8368,6 +8618,29 @@ class Pipe:
 
                 except Exception as e:
 
+                    _thinking_cfg = payload_for_stream.get("thinking")
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "bound to a different conversation" in str(e)
+                        and isinstance(_thinking_cfg, dict)
+                        and "block_binding" not in _thinking_cfg
+
+                        and _thinking_cfg.get("type") != "between_tools"
+                    ):
+                        logger.warning(
+                            "[THINKING-BINDING] prompt prefix changed since earlier thinking "
+                            "blocks were produced; retrying with prefix_mismatch_behavior=drop_block"
+                        )
+                        payload_for_stream["thinking"] = {
+                            **_thinking_cfg,
+                            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+                        }
+                        _betas = list(payload_for_stream.get("betas") or [])
+                        if "thinking-binding-controls-2026-08-01" not in _betas:
+                            _betas.append("thinking-binding-controls-2026-08-01")
+                        payload_for_stream["betas"] = _betas
+                        continue
+
                     await _finalize_open_code_block(request_ctx)
                     server_tool_state.current_code = ""
                     should_retry, retry_attempts, response_suffix = await self._handle_stream_exception(
@@ -8580,6 +8853,51 @@ class Pipe:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to persist usage to chat_message: {e}")
+
+        passthrough_calls = request_ctx.state.tool_use.passthrough_calls
+        if passthrough_calls and not body.get("stream", True):
+            logger.info(
+                "Returning %d passthrough tool_call(s) as an OpenAI completion object",
+                len(passthrough_calls),
+            )
+            completion: dict[str, Any] = {
+                "id": f"chatcmpl-{run_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": body.get("model", ""),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+
+                            "content": self._sanitize_task_text(
+                                request_ctx.state.tool_use.text_before_passthrough or ""
+                            ),
+                            "tool_calls": passthrough_calls,
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+            if include_usage and total_usage:
+                completion["usage"] = self._public_usage(total_usage)
+
+            completion["output"] = [
+                {
+                    "type": "message",
+                    "id": f"msg-{run_id}",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": completion["choices"][0]["message"]["content"],
+                        }
+                    ],
+                }
+            ]
+            return completion
 
         return final_text()
 

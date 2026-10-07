@@ -66,12 +66,22 @@ class ToolUseState:
     running_tasks: list[Any] = field(default_factory=list)
     progress_blocks: dict[str, str] = field(default_factory=dict)
     api_passthrough: bool = False
+    # Tool calls the caller has to execute itself: tools that arrived in
+    # body.tools with no callable attached. Kept in OpenAI shape so a
+    # non-streaming response can hand them back as `tool_calls` instead of
+    # dumping the arguments into the message text.
+    passthrough_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Text as it stood before the first passthrough call appended its arguments.
+    # None means no passthrough call happened in this turn.
+    text_before_passthrough: Optional[str] = None
 
     def reset_for_iteration(self) -> None:
         """Clear dispatched-tool bookkeeping before the next tool-loop iteration."""
         self.running_tasks = []
         self.progress_blocks = {}
         self.api_passthrough = False
+        # `passthrough_calls` deliberately survives: it is the turn's result,
+        # not per-iteration bookkeeping, and is read after the loop ends.
 
 
 @dataclass

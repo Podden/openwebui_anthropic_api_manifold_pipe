@@ -82,8 +82,15 @@ async def create_request_payload(
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5)
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5).
+    # Two ways in: the admin valve turns it on for every request, the toggle
+    # filter turns it on for a single message. Fast mode is a per-request
+    # trade (latency against depth), so the per-message switch is the one
+    # people actually want -- OR them rather than letting the valve win.
+    fast_requested = pipe.valves.ENABLE_FAST_MODE or (__metadata__ or {}).get(
+        "anthropic_fast", False
+    )
+    if fast_requested and model_info.get("supports_fast_mode", False):
         payload["speed"] = "fast"
         logger.debug("Fast Mode enabled for this request")
         
@@ -117,6 +124,17 @@ async def create_request_payload(
     enable_thinking = __user__["valves"].ENABLE_THINKING or __metadata__.get(
         "anthropic_thinking", False
     )
+    if not enable_thinking and model_info.get("thinking_always_on"):
+        # Opus 5.5 400s on thinking:{"type":"disabled"}; effort is the only
+        # knob, so "thinking off" becomes the cheapest effort instead.
+        if effort_config is not None:
+            logger.debug(
+                f"Thinking can't be disabled on {actual_model_name}: "
+                f"effort '{effective_effort}' -> 'low'"
+            )
+            effective_effort = "low"
+            effort_config = {"effort": "low"}
+        enable_thinking = True
     if enable_thinking and model_info["supports_thinking"]:
         # Opus 4.6 (supports adaptive thinking) uses effort as the control
         if model_info["supports_adaptive_thinking"]:
@@ -148,20 +166,29 @@ async def create_request_payload(
             )
 
         thinking_display = __user__["valves"].THINKING_DISPLAY
-        if thinking_display in ("omitted", "summarized"):
+        if thinking_display in ("omitted", "summarized", "updates"):
             thinking_config["display"] = thinking_display
+
+        # Replayed thinking blocks are bound to the request prefix (system,
+        # tools, earlier messages) on Fable 5.1 / Opus 5.5. block_binding is
+        # deliberately NOT sent here: on accounts created before 2026-08-31 it
+        # opts the request in to the check, and blocks the model could still
+        # read get dropped (live-verified 2026-09-22). Newer accounts get a 400
+        # instead, which the orchestrator retries once with drop_block.
 
         payload["thinking"] = thinking_config
     elif model_info.get("thinking_on_by_default"):
         # Opus 5 / Sonnet 5 think unless told otherwise, so simply omitting the
         # `thinking` field no longer honours the toggle — send the explicit
-        # disable. Opus 5 rejects `thinking:{"type":"disabled"}` at effort
-        # xhigh/max with a 400, so the toggle also caps effort at high.
-        payload["thinking"] = {"type": "disabled"}
+        # disable. Sonnet 5.5 400s on "disabled"; its lowest setting is
+        # "between_tools". Both are rejected at effort xhigh/max with a 400, so
+        # the toggle also caps effort at high.
+        off_type = model_info.get("thinking_off_type", "disabled")
+        payload["thinking"] = {"type": off_type}
         if effective_effort in ("xhigh", "max"):
             logger.info(
-                f"Thinking disabled on {actual_model_name}: effort "
-                f"'{effective_effort}' is incompatible with thinking:disabled, "
+                f"Thinking off on {actual_model_name}: effort "
+                f"'{effective_effort}' is incompatible with thinking:{off_type}, "
                 "clamping to 'high'"
             )
             effective_effort = "high"
@@ -554,9 +581,24 @@ async def create_request_payload(
         if context_management:
             payload["context_management"] = {"edits": context_management}
 
+    # OpenWebUI's own Context Compaction (admin setting, runs before any filter
+    # or pipe) has already summarized this chat when its marker sits in the
+    # system prompt. Two summarizers on one conversation is waste: OpenWebUI
+    # wins for that request and the API-side compaction stays off.
+    owui_compacted = any(
+        isinstance(_b, dict) and "[CONVERSATION SUMMARY]" in str(_b.get("text", ""))
+        for _b in (system_messages or [])
+    )
+    if owui_compacted and __user__["valves"].ENABLE_COMPACTION:
+        logger.info("OpenWebUI context compaction detected - skipping API-side compaction for this request")
+
     # Add compaction if enabled and model supports it. New beta support may need
     # MODEL_CAPABILITY_OVERRIDES because API capability metadata can lag.
-    if __user__["valves"].ENABLE_COMPACTION and model_info.get("supports_compaction", False):
+    if (
+        __user__["valves"].ENABLE_COMPACTION
+        and not owui_compacted
+        and model_info.get("supports_compaction", False)
+    ):
         if "context-management-2025-06-27" not in beta_headers:
             beta_headers.append("context-management-2025-06-27")
         beta_headers.append("compact-2026-01-12")
@@ -584,11 +626,18 @@ async def create_request_payload(
     if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
         beta_headers.append("fast-mode-2026-02-01")
 
+    if (payload.get("thinking") or {}).get("display") == "updates":
+        beta_headers.append("thinking-display-updates-2026-08-18")
+
     # Server-side fallback on safety refusals. Claude API only — not supported on
     # Bedrock / Vertex / Foundry or the Batches API, so it stays off whenever the
-    # base URL is not Anthropic's.
+    # base URL is not Anthropic's, and for models without fallback (Haiku 5.5).
     fallback_mode = getattr(pipe.valves, "REFUSAL_FALLBACK", "off")
-    if fallback_mode != "off" and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE:
+    if (
+        fallback_mode != "off"
+        and pipe.valves.ANTHROPIC_BASE_URL.rstrip("/") == pipe._DEFAULT_API_BASE
+        and model_info.get("supports_refusal_fallback", True)
+    ):
         beta_headers.append("server-side-fallback-2026-07-01")
         # `fallbacks` is not a named SDK parameter yet, so pass it through
         # extra_body (same route as `diagnostics`) instead of as a kwarg the
@@ -657,7 +706,12 @@ async def create_request_payload(
             # Check if web_search is actually in the tools list
             has_web_search = any(t.get("name") == "web_search" for t in tools_list)
             if has_web_search:
-                if "thinking" not in payload:
+                if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
+                    payload["tool_choice"] = {"type": "auto"}
+                    logger.info(
+                        f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
+                    )
+                elif "thinking" not in payload:
                     # No thinking active - enforce web_search
                     payload["tool_choice"] = {"type": "tool", "name": "web_search"}
                     logger.debug("Enforcing web_search via tool_choice")
@@ -688,6 +742,15 @@ async def create_request_payload(
         else:
             # Already in Anthropic format or other dict format
             payload["tool_choice"] = api_tc
+        if (
+            isinstance(payload["tool_choice"], dict)
+            and payload["tool_choice"].get("type") in ("tool", "any")
+            and not model_info.get("supports_forced_tool_choice", True)
+        ):
+            logger.info(
+                f"{actual_model_name} rejects tool_choice {payload['tool_choice']} - degrading to auto"
+            )
+            payload["tool_choice"] = {"type": "auto"}
         logger.debug(f"API tool_choice passthrough: {payload['tool_choice']}")
 
     # Filter stale tool_search references for tools toggled OFF.

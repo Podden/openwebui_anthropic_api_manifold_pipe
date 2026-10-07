@@ -228,6 +228,29 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 "🔄 API tool passthrough for '%s': returning tool input as response",
                 tool_name,
             )
+            # Record the call in OpenAI shape. A non-streaming caller gets these
+            # back as a real `tool_calls` array (see the finalization phase);
+            # the text emit below stays for streaming clients, which have no
+            # other channel for it.
+            # Snapshot the prose Claude wrote before the first passthrough call,
+            # taken before the emit below appends the argument JSON to it. That
+            # emit is what made the arguments show up as message text; the
+            # non-streaming response uses this clean prefix as its content.
+            if tool_use.text_before_passthrough is None:
+                tool_use.text_before_passthrough = ctx.text()
+            tool_use.passthrough_calls.append(
+                {
+                    "id": tool_call_data.get("id") or tool_use.tool_id_at_start,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            tool_input if isinstance(tool_input, dict) else {},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            )
             await emit_delta(json.dumps(tool_input, ensure_ascii=False))
             tool_use.api_passthrough = True
         else:

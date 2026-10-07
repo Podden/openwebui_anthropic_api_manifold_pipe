@@ -713,7 +713,24 @@ class PipeOrchestratorMethods:
                                     tool_use_state.reset_for_iteration()
                                     has_pending_tool_calls = True
                                 elif stop_reason == "max_tokens":
-                                    text_state.chunk += "Claude has Reached the maximum token limit!"
+                                    # OUTPUT ceiling for this one call, not the
+                                    # context window -- the old wording said
+                                    # "maximum token limit" and sent people
+                                    # hunting through their context for a
+                                    # problem that was never there. Name the
+                                    # limit so it diagnoses itself.
+                                    _cap = payload_for_stream.get("max_tokens")
+                                    text_state.chunk += (
+                                        "\n\n⚠️ Response cut off: the model hit its output limit"
+                                        + (f" (max_tokens = {_cap:,})" if _cap else "")
+                                        + ". This is not the context window — raise max_tokens for this model."
+                                    )
+                                    # Without this the loop falls through to the
+                                    # truncated-stream retry below and replays
+                                    # the whole request MAX_RETRIES times, each
+                                    # one truncating at the same ceiling and each
+                                    # one billed. The turn is over; say so.
+                                    conversation_ended = True
                                 elif stop_reason == "end_turn":
                                     conversation_ended = True
                                 elif stop_reason == "pause_turn":
@@ -1118,6 +1135,37 @@ class PipeOrchestratorMethods:
                 # - APIConnectionError: Network issues, retryable
                 # ---------------------------------------------------------
                 except Exception as e:
+                    # Opus 5.5 binds replayed thinking blocks to the prefix they
+                    # were produced with. OpenWebUI edits that prefix (tool
+                    # toggles, system prompt), and accounts created after
+                    # 2026-08-31 get a 400 for it. Retry once with drop_block:
+                    # the stale reasoning is lost, the turn goes through. Not sent
+                    # up front because on older accounts it would opt in to the
+                    # check and drop reasoning the model could otherwise read.
+                    # ponytail: retried per turn, not remembered per chat; one
+                    # fast unbilled 400 per affected turn.
+                    _thinking_cfg = payload_for_stream.get("thinking")
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "bound to a different conversation" in str(e)
+                        and isinstance(_thinking_cfg, dict)
+                        and "block_binding" not in _thinking_cfg
+                        # between_tools accepts no other thinking field
+                        and _thinking_cfg.get("type") != "between_tools"
+                    ):
+                        logger.warning(
+                            "[THINKING-BINDING] prompt prefix changed since earlier thinking "
+                            "blocks were produced; retrying with prefix_mismatch_behavior=drop_block"
+                        )
+                        payload_for_stream["thinking"] = {
+                            **_thinking_cfg,
+                            "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+                        }
+                        _betas = list(payload_for_stream.get("betas") or [])
+                        if "thinking-binding-controls-2026-08-01" not in _betas:
+                            _betas.append("thinking-binding-controls-2026-08-01")
+                        payload_for_stream["betas"] = _betas
+                        continue
                     # Finalize any open live code_exec block before handling error, so it
                     # does not stay stuck mid-render behind the error message.
                     await _finalize_open_code_block(request_ctx)
@@ -1390,5 +1438,74 @@ class PipeOrchestratorMethods:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to persist usage to chat_message: {e}")
+
+        # Non-streaming callers that passed their own `tools` in the request body
+        # expect an OpenAI completion object with a real `tool_calls` array --
+        # that is the contract generate_chat_completion consumers read (sub-agent
+        # tools among them). Returning a string put the arguments in
+        # message.content with finish_reason "stop", so those callers saw a tool
+        # call as prose and gave up. OpenWebUI passes a dict return straight
+        # through (functions.py), so shaping it here is enough.
+        #
+        # Deliberately narrow: only a non-streaming request that actually
+        # produced passthrough calls takes this path. Everything else keeps
+        # returning text, streaming included -- a streaming client has no way to
+        # consume this object.
+        passthrough_calls = request_ctx.state.tool_use.passthrough_calls
+        if passthrough_calls and not body.get("stream", True):
+            logger.info(
+                "Returning %d passthrough tool_call(s) as an OpenAI completion object",
+                len(passthrough_calls),
+            )
+            completion: dict[str, Any] = {
+                "id": f"chatcmpl-{run_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": body.get("model", ""),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            # Any prose Claude emitted before the call is kept,
+                            # but stripped of rendered collapsibles: a tool_search
+                            # round or a thinking block leaves <details> markup in
+                            # the text, and this response goes to an API client or
+                            # a parent agent, not to the chat renderer.
+                            "content": self._sanitize_task_text(
+                                request_ctx.state.tool_use.text_before_passthrough or ""
+                            ),
+                            "tool_calls": passthrough_calls,
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+            if include_usage and total_usage:
+                completion["usage"] = self._public_usage(total_usage)
+            # `output` is not decoration. OpenWebUI's non-streaming handler gates
+            # the whole finalisation block -- chat:completion event, the
+            # upsert into chat_message, title generation, outlet filters -- on
+            # `content or response_output` (middleware.non_streaming_chat_response_handler).
+            # A pure tool call has no prose, so content is legitimately "" and
+            # every one of those steps would be skipped: the turn would vanish
+            # from a saved chat instead of merely looking odd. Providing the
+            # output envelope ourselves keeps persistence on the same path
+            # OpenWebUI would have built for us.
+            completion["output"] = [
+                {
+                    "type": "message",
+                    "id": f"msg-{run_id}",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": completion["choices"][0]["message"]["content"],
+                        }
+                    ],
+                }
+            ]
+            return completion
 
         return final_text()

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.27
+version: 0.9.31
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -33,11 +33,48 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5 / 4.8
+- Fast Mode for Opus 5.5 / 5 / 4.8
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.31
+- Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max
+- Sonnet 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now sends its lowest setting thinking:{"type":"between_tools"} there (no up-front thinking; notes between tool calls still arrive as thinking blocks). Like the Opus 5 disable, it is capped at effort 'high'
+- Sonnet 5.5 rejects forced tool_choice ("tool" / "any"): degraded to "auto", same as Opus 5.5 / Fable 5.1
+- Advisor pairs for a Sonnet 5.5 executor: Opus 5.5, Opus 5, Sonnet 5.5, Fable 5 / 5.1, Mythos 5 / 5.1. Opus 5.5 is now selectable as ADVISOR_MODEL
+- The drop_block retry for changed prompt prefixes is skipped for between_tools requests, which accept no other thinking field
+- Sonnet 5.5 added to REFUSAL_FALLBACK and MEMORY_REVIEW_MODEL
+- Added Claude Haiku 5.5 (claude-haiku-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max. Thinking off sends thinking:{"type":"disabled"} (capped at effort 'high'); forced tool_choice keeps working
+- Haiku 5.5 has no server-side refusal fallback (a pinned fallback model 400s), so REFUSAL_FALLBACK is skipped for it
+- Advisor pairs for a Haiku 5.5 executor: Opus 5.5 / 5 / 4.8 / 4.7, Fable 5 / 5.1, Mythos 5 / 5.1, Sonnet 5.5 / 5, Haiku 5.5
+- Haiku 5.5 added to MEMORY_REVIEW_MODEL and is now its default (about a tenth of Haiku 4.5's price)
+
+v0.9.30
+- Added Claude Opus 5.5 (claude-opus-5-5): 1M context, 128k output, always-on adaptive thinking, full effort ladder incl. max, fast mode
+- Opus 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now lowers effort to 'low' there instead of disabling thinking
+- Opus 5.5 rejects forced tool_choice ("tool" / "any"), same handling as Fable 5.1: degraded to "auto"
+- thinking.block_binding "drop_block" is no longer sent up front. On accounts created before 2026-08-31 it opted every request in to the prefix check and dropped thinking blocks the model could otherwise still read. Newer accounts get a 400 for a changed prefix instead; the pipe now retries that request once with drop_block, so the turn still goes through
+- THINKING_DISPLAY 'updates' also covers Opus 5.5, where the notes between tool calls arrive as thinking blocks and stay empty at 'omitted'. Its beta header is now sent whenever 'updates' is used
+- Opus 5.5 is not a valid advisor pair yet: the advisor tool is skipped on that executor instead of 400ing
+
+v0.9.29
+- Added Claude Fable 5.1 / Mythos 5.1 to the capability overrides, output/context fallbacks and the advisor model list (128k output, 1M context, adaptive thinking, compaction, structured outputs)
+- tool_choice "tool"/"any" is no longer sent to models that reject it: Fable 5.1 and Mythos 5.1 return a 400 for forced tool use, so web-search enforcement and forced tool_choice from the request body degrade to "auto" on them (logged) instead of failing the request
+- Thinking blocks replayed to Fable 5.1 are bound to the request prefix (system, tools, earlier messages). OpenWebUI changes that prefix between turns (memory/RAG appendix, tool toggles, context compaction summary), so the pipe now sends thinking.block_binding.prefix_mismatch_behavior "drop_block" (beta thinking-binding-controls-2026-08-01) and logs the input_transformations the API reports instead of surfacing a 400
+- THINKING_DISPLAY accepts "updates" (beta thinking-display-updates-2026-08-18): reasoning stays hidden, the one-line progress updates Fable 5 / 5.1 write before a tool call are shown as thinking text
+- ENABLE_COMPACTION steps aside when OpenWebUI's own Context Compaction (0.11.3+, Admin > Interface) has already summarized the chat: its "[CONVERSATION SUMMARY]" marker in the system prompt disables the API-side compaction for that request, so the two never run on the same conversation. The valve description says so
+
+v0.9.28
+- Fixed every tool being deferred for tool search regardless of the exclude list: TOOL_SEARCH_EXCLUDE_TOOLS is a List[str], but its default shipped as a single multi-line comma-separated blob inside a one-element list, so the `name not in excludes` test never matched anything. Anthropic server tools and even the tool_search tool itself were deferred. On endpoints that do not implement deferred loading (litellm/Bedrock and other proxies) this produced a hard 400, "tool_use ids were found without tool_result blocks" (#44, reported by @icsy7867)
+- TOOL_SEARCH_EXCLUDE_TOOLS is now a multiselect with a real list default; comma-separated and legacy blob values still load
+- Raised the max_tokens fallback for unrecognised model ids from 4096 to 64000. Proxies that rename models (litellm/Bedrock ids such as "us.anthropic.claude-sonnet-5-v1:0") miss the lookup table and landed on a ceiling every current Claude far exceeds, truncating long answers (#43, reported by @icsy7867)
+- The truncation notice no longer says "Claude has Reached the maximum token limit!". That reads as a full context window and sent people auditing their conversation; it now names the actual output limit and its value
+- Fixed a truncated answer being retried up to MAX_RETRIES times: stop_reason "max_tokens" did not end the turn, so it fell through to the truncated-stream retry and replayed the whole request, each attempt stopping at the same ceiling and each one billed
+- Non-streaming requests that carry their own `tools` in the body now return a real OpenAI `tool_calls` array with finish_reason "tool_calls" instead of the arguments serialized into message.content with finish_reason "stop". Callers that read message.tool_calls (generate_chat_completion consumers, sub-agent tools) saw a tool call as prose and stopped after one iteration. Streaming behaviour is unchanged (#35, reported by @kdo-jl)
+- Tools passed in body.tools are no longer deferred for tool search. The caller runs them itself, so making the model look them up first only added an API round trip before it could answer (#35)
+- Added a Fast Mode toggle filter (anthropic_pipe_fast_toggle.py) for per-message fast requests on Opus 5 / 4.8, next to the existing admin valve. Speed against depth is a per-request trade; the toggle is ignored on models without fast mode rather than failing the request (#50, requested by @Willian-Zhang)
+
 v0.9.27
 - Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
 - Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
@@ -713,6 +750,85 @@ HIDDEN_BLOCKS: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
     "anthropic_pipe_hidden_blocks", default=frozenset()
 )
 
+# Tools that must never carry `defer_loading`, split by who owns them.
+#
+# Anthropic server tools are executed inside the API and are addressed by
+# `type`, not by a schema we send; deferring them is meaningless. The two
+# tool_search tools are worse than meaningless -- deferring the tool that
+# resolves deferred tools is circular. OpenWebUI's own builtins are listed so a
+# default install never pays a tool_search round trip for them.
+#
+# Kept as a module constant so the UserValves default and the multiselect
+# options below cannot drift apart.
+ANTHROPIC_SERVER_TOOL_NAMES = [
+    "web_search",
+    "web_fetch",
+    "code_execution",
+    "bash_code_execution",
+    "text_editor_code_execution",
+    "tool_search_tool_regex",
+    "tool_search_tool_bm25",
+    "advisor",
+    "mcp_toolset",
+    "memory",
+    "bash",
+    "str_replace_based_edit_tool",
+    "computer",
+]
+
+OPENWEBUI_BUILTIN_TOOL_NAMES = [
+    "add_memory", "ask_user", "calculate_timestamp", "create_automation",
+    "create_calendar_event", "create_tasks", "delegate_task",
+    "delete_automation", "delete_calendar_event", "delete_memory",
+    "edit_image", "execute_code", "fetch_url", "generate_image",
+    "get_current_timestamp", "grep_chat_files", "grep_knowledge_files",
+    "list_automations", "list_chat_files", "list_knowledge",
+    "list_knowledge_bases", "list_memories", "list_memory_paths",
+    "notify", "query_chat_files", "query_knowledge_bases",
+    "query_knowledge_files", "read_memory_path", "replace_memory_content",
+    "replace_note_content", "search_calendar_events",
+    "search_channel_messages", "search_channels", "search_chats",
+    "search_knowledge_bases", "search_knowledge_files", "search_memories",
+    "search_notes", "search_web", "timer", "toggle_automation",
+    "update_automation", "update_calendar_event", "update_memory",
+    "update_task", "view_channel_message", "view_channel_thread",
+    "view_chat", "view_file", "view_knowledge_file", "view_note",
+    "view_skill", "write_note",
+    # Open Terminal / kb tools
+    "kb_exec",
+    "display_file", "get_process_status", "glob_search", "grep_search",
+    "kill_process", "list_files", "list_processes", "read_file",
+    "replace_file_content", "run_command", "send_process_input",
+    "write_file",
+]
+
+DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
+    ANTHROPIC_SERVER_TOOL_NAMES + OPENWEBUI_BUILTIN_TOOL_NAMES
+)
+
+
+def normalize_tool_name_list(value: Any) -> set[str]:
+    """Flatten a tool-name valve into a set of bare names.
+
+    Accepts what the valve actually contains rather than what its type says.
+    OpenWebUI renders a `List[str]` without a multiselect hint as a single
+    comma-joined text field, and versions of this pipe before 0.9.28 shipped the
+    default as one multi-line blob string inside a one-element list -- so stored
+    values in the wild are any of: a proper list, a comma-separated string, or a
+    list holding one comma-separated string. Membership tests against the raw
+    value silently fail on the last two, which is how every excluded tool ended
+    up deferred anyway.
+    """
+    if value is None:
+        return set()
+    items = value if isinstance(value, (list, tuple, set)) else [value]
+    return {
+        name.strip()
+        for item in items
+        for name in str(item).split(",")
+        if name.strip()
+    }
+
 # True while serving an OpenWebUI sub-agent run (request.state.internal). The
 # response is then not read by a human but pasted verbatim into the PARENT
 # agent's context, so every decoration is pure token cost there: collapsibles
@@ -1159,6 +1275,8 @@ class Pipe:
     # report max_tokens (custom/Azure endpoints, ENABLED_MODELS manual ids). The
     # live API value always wins for direct Anthropic. Keyed by base (suffix-stripped) id.
     MODEL_MAX_TOKENS_FALLBACK = {
+        "claude-opus-5-5": 128000,
+        "claude-sonnet-5-5": 128000,
         "claude-opus-5": 128000,
         "claude-opus-4-8": 128000,
         "claude-opus-4-7": 128000,
@@ -1169,6 +1287,9 @@ class Pipe:
         "claude-sonnet-4-5": 64000,
         "claude-fable-5": 128000,
         "claude-mythos-5": 128000,
+        "claude-fable-5-1": 128000,
+        "claude-mythos-5-1": 128000,
+        "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
 
@@ -1181,15 +1302,20 @@ class Pipe:
     # max_input_tokens as reported by /v1/models (verified 2026-08-10); Haiku 4.5
     # and Opus 4.5 are the 200k exceptions and stay on the generic default.
     MODEL_CONTEXT_LENGTH_FALLBACK = {
+        "claude-opus-5-5": 1000000,
+        "claude-sonnet-5-5": 1000000,
         "claude-opus-5": 1000000,
         "claude-sonnet-5": 1000000,
         "claude-fable-5": 1000000,
         "claude-mythos-5": 1000000,
+        "claude-fable-5-1": 1000000,
+        "claude-mythos-5-1": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
         "claude-sonnet-4-6": 1000000,
         "claude-sonnet-4-5": 1000000,
+        "claude-haiku-5-5": 1000000,
     }
 
     # Identity-keyed capability fixups, applied on top of whatever /v1/models
@@ -1204,6 +1330,23 @@ class Pipe:
     # which the API rejects. Pinning it per identity makes those endpoints
     # behave like the direct one.
     MODEL_CAPABILITY_OVERRIDES = {
+        # Fable 5.1 / Mythos 5.1 reject tool_choice "tool" and "any" with a 400
+        # (auto/none unchanged). /v1/models does not report that, so it is
+        # pinned by identity; Mythos mirrors Fable (see the parity note below).
+        "claude-fable-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
+        "claude-mythos-5-1": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_adaptive_thinking": True,
+            "supports_structured_outputs": True,
+            "supports_forced_tool_choice": False,
+        },
          "claude-fable-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
@@ -1222,7 +1365,7 @@ class Pipe:
         },
         # No capability fixups of their own, but they still need the structured
         # outputs pin: task requests fire on a freshly loaded Pipe whose API
-        # capability cache is still empty, and Haiku 4.5 is the default
+        # capability cache is still empty, and Haiku 4.5 is a selectable
         # MEMORY_REVIEW_MODEL. All three report structured_outputs support and
         # no adaptive thinking (verified 2026-08-10).
         "claude-haiku-4-5": {
@@ -1234,6 +1377,22 @@ class Pipe:
         "claude-sonnet-4-5": {
             "supports_structured_outputs": True,
         },
+        "claude-opus-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            # Adaptive thinking is always on: thinking:{"type":"disabled"} and
+            # {"type":"enabled"} both 400. Effort is the only control.
+            "thinking_always_on": True,
+            # tool_choice "tool" / "any" 400 on this model; only auto / none.
+            "supports_forced_tool_choice": False,
+        },
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
@@ -1244,12 +1403,44 @@ class Pipe:
             # is sent explicitly. Disabling is rejected at effort xhigh/max.
             "thinking_on_by_default": True,
         },
+        "claude-sonnet-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_on_by_default": True,
+            # thinking:{"type":"disabled"} 400s; the lowest setting is
+            # between_tools (no up-front thinking, effort low..high only).
+            "thinking_off_type": "between_tools",
+            # tool_choice "tool" / "any" 400 on this model; only auto / none.
+            "supports_forced_tool_choice": False,
+        },
         "claude-sonnet-5": {
             "supports_dynamic_filtering": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
             "thinking_on_by_default": True,
+        },
+        "claude-haiku-5-5": {
+            "supports_dynamic_filtering": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            # Thinks unless thinking:{"type":"disabled"} is sent; disabling is
+            # rejected at effort xhigh/max (same rule as Opus 5).
+            "thinking_on_by_default": True,
+            # No server-side fallback: "default" stays declined and a pinned
+            # fallback model 400s.
+            "supports_refusal_fallback": False,
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
@@ -1329,13 +1520,15 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
             "default",
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ] = Field(
@@ -1344,7 +1537,8 @@ class Pipe:
                 "Retry server-side on another model when the safety classifier refuses a "
                 "request, instead of returning the refusal. 'default' lets Anthropic pick the "
                 "recommended model per refusal category; picking a model pins that one. "
-                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints."
+                "Claude API only — ignored on Bedrock / Vertex / Foundry endpoints and "
+                "for Haiku 5.5, which has no server-side fallback."
             ),
         )
         ENABLE_INTERLEAVED_THINKING: bool = Field(
@@ -1395,12 +1589,15 @@ class Pipe:
         )
         MEMORY_REVIEW_MODEL: Literal[
             "claude-haiku-4-5",
+            "claude-haiku-5-5",
             "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-opus-4-8",
             "claude-opus-5",
+            "claude-opus-5-5",
             "same as chat model",
         ] = Field(
-            default="claude-haiku-4-5",
+            default="claude-haiku-5-5",
             description=(
                 "Model used for OpenWebUI's background memory review "
                 "(ENABLE_MEMORY_BACKGROUND_REVIEW). OpenWebUI runs that review on the "
@@ -1496,9 +1693,9 @@ class Pipe:
             le=64000,
             description="Thinking budget tokens",
         )
-        THINKING_DISPLAY: Literal["summarized", "omitted"] = Field(
+        THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
-            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text.",
+            description="'summarized' returns summarized thinking, 'omitted' hides thinking in favor of faster time-to-first-text, 'updates' (beta) hides reasoning but shows the short progress updates Fable 5 / 5.1, Opus 5.5 and Sonnet 5.5 write before each tool call.",
         )
         EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = Field(
             default="high",
@@ -1595,44 +1792,13 @@ class Pipe:
             description="Tools with longer JSON definitions characters will be deferred.",
         )
         TOOL_SEARCH_EXCLUDE_TOOLS: List[str] = Field(
-            default=["""
-            web_search,web_fetch,code_execution,
-            bash_code_execution,
-            text_editor_code_execution,
-            tool_search_tool_regex,
-            tool_search_tool_bm25,
-
-            advisor,
-            mcp_toolset,
-
-            memory,
-            bash,
-            str_replace_based_edit_tool,
-            computer,
-             add_memory, ask_user, calculate_timestamp, create_automation,
-            create_calendar_event, create_tasks, delegate_task,
-            delete_automation, delete_calendar_event, delete_memory,
-            edit_image, execute_code, fetch_url, generate_image,
-            get_current_timestamp, grep_chat_files, grep_knowledge_files,
-            list_automations, list_chat_files, list_knowledge,
-            list_knowledge_bases, list_memories, list_memory_paths,
-            notify, query_chat_files, query_knowledge_bases,
-            query_knowledge_files, read_memory_path, replace_memory_content,
-            replace_note_content, search_calendar_events,
-            search_channel_messages, search_channels, search_chats,
-            search_knowledge_bases, search_knowledge_files, search_memories,
-            search_notes, search_web, timer, toggle_automation,
-            update_automation, update_calendar_event, update_memory,
-            update_task, view_channel_message, view_channel_thread,
-            view_chat, view_file, view_knowledge_file, view_note,
-            view_skill, write_note,
-
-            kb_exec,
-
-            display_file, get_process_status, glob_search, grep_search,
-            kill_process, list_files, list_processes, read_file,
-            replace_file_content, run_command, send_process_input,
-            write_file"""],
+            default=list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+            json_schema_extra={
+                "input": {
+                    "type": "multiselect",
+                    "options": list(DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS),
+                }
+            },
             description="Excluded Tools are always loaded. Anthropic tools and OpenWebUI-native tools (builtin + Open Terminal) are excluded by default.",
         )
         # Advisor tool (advisor-tool-2026-03-01) — per-user
@@ -1640,7 +1806,7 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-mythos-5"] = Field(
+        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
             default="claude-opus-5",
             description="Advisor model ID.",
         )
@@ -1665,7 +1831,7 @@ class Pipe:
         )
         ENABLE_COMPACTION: bool = Field(
             default=False,
-            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens.",
+            description="Enable automatic context compaction. When input tokens exceed the trigger threshold, the API summarizes older conversation context to save tokens. If OpenWebUI's own Context Compaction (Admin > Interface) is enabled, it runs first and wins: the pipe detects its summary and does not compact a second time. Turn one of the two off; both at once is wasted work.",
         )
         COMPACTION_TRIGGER_TOKENS: int = Field(
             default=50000,

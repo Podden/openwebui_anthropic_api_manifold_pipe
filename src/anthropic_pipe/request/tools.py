@@ -227,7 +227,11 @@ class PipeRequestToolsMethods:
         # Add advisor tool if enabled (beta). Executor↔advisor pair validation
         # The advisor must be at least as capable as the executor.
         # If the pair is invalid, downgrade the advisor to the next compatible model.
-        if __user__["valves"].ENABLE_ADVISOR_TOOL:
+        # Opus 5.5 has no row in Anthropic's advisor compatibility table
+        # (2026-09-22), so any advisor would 400 the request.
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and actual_model_name == "claude-opus-5-5":
+            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
+        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
             executor_model = actual_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
@@ -237,7 +241,16 @@ class PipeRequestToolsMethods:
             # "unsupported" and "incompatible" cases.
             valid_advisors = {
                 "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-haiku-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+                ],
                 "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
+                "claude-sonnet-5-5": [
+                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+                ],
                 "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
                 "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
                 "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
@@ -358,16 +371,23 @@ class PipeRequestToolsMethods:
             is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
 
         _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
+        user_excludes = normalize_tool_name_list(
+            __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
+        )
 
         for claude_tool in claude_tools:
             # Check if tool should be deferred for tool search
             # IMPORTANT: Skip deferring when programmatic tool calling is active.
             if _defer_active:
-                # Skip deferring if tool is in exclusion list
+                # Skip deferring if tool is in exclusion list, or if the caller
+                # executes the tool itself. A passthrough tool is one the client
+                # sent in body.tools and will run on its own; making the model
+                # search for it first buys nothing and costs an extra round trip
+                # before it can answer (#35).
                 name = claude_tool["name"]
-                user_excludes = __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
                 if (
-                    name != forced_tool_name
+                    name not in api_tool_names
+                    and name != forced_tool_name
                     and name not in user_excludes
                 ):
                     # Calculate tool definition size (JSON representation)

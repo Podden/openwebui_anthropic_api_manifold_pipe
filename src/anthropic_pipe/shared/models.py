@@ -40,6 +40,10 @@ class PipeModelSupportMethods:
             "supports_dynamic_filtering": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+            # tool_choice "tool"/"any"; pinned False by identity where the API 400s
+            "supports_forced_tool_choice": True,
+            # server-side refusal fallback; pinned False by identity (Haiku 5.5)
+            "supports_refusal_fallback": True,
         }
 
         # Apply model-specific overrides for fields not available from API
@@ -68,8 +72,14 @@ class PipeModelSupportMethods:
         # Return conservative defaults for unknown models, then apply identity
         # overrides for beta features whose API capability metadata can lag.
         info = {
+            # 64000 rather than a timid 4096: every current Claude sustains at
+            # least that much output (Haiku 4.5 and Opus 4.5 are the floor), and
+            # proxies that rename models — litellm/Bedrock ids like
+            # "us.anthropic.claude-sonnet-5-v1:0" — miss the table above and land
+            # here. A too-small ceiling truncates answers with stop_reason
+            # "max_tokens", which reads like a context problem and is not one.
             "max_tokens": cls.MODEL_MAX_TOKENS_FALLBACK.get(model_name)
-            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 4096),
+            or cls.MODEL_MAX_TOKENS_FALLBACK.get(normalized, 64000),
             "context_length": cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(model_name)
             or cls.MODEL_CONTEXT_LENGTH_FALLBACK.get(normalized, 200000),
             "supports_thinking": True,
@@ -85,6 +95,8 @@ class PipeModelSupportMethods:
             "supports_effort_xhigh": False,
             "supports_fast_mode": False,
             "thinking_on_by_default": False,
+            "supports_forced_tool_choice": True,
+            "supports_refusal_fallback": True,
         }
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_name)
         if overrides is None:
