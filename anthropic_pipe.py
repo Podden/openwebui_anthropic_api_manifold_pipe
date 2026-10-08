@@ -1959,8 +1959,11 @@ async def create_request_payload(
         beta_headers.append("effort-2025-11-24")
         payload["output_config"] = effort_config
 
-    # Add Fast Mode beta header if enabled and model supports it
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    # Add Fast Mode beta header whenever the request actually asks for fast
+    # speed. Bind to payload["speed"] -- set above from the valve OR the
+    # per-message toggle and already gated on supports_fast_mode -- so the
+    # opt-in header follows the toggle, not just the admin valve.
+    if payload.get("speed") == "fast":
         beta_headers.append("fast-mode-2026-02-01")
 
     if (payload.get("thinking") or {}).get("display") == "updates":

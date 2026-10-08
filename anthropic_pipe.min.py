@@ -1593,7 +1593,7 @@ async def create_request_payload(
         beta_headers.append("effort-2025-11-24")
         payload["output_config"] = effort_config
 
-    if pipe.valves.ENABLE_FAST_MODE and model_info.get("supports_fast_mode", False):
+    if payload.get("speed") == "fast":
         beta_headers.append("fast-mode-2026-02-01")
 
     if (payload.get("thinking") or {}).get("display") == "updates":
