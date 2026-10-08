@@ -387,7 +387,15 @@ class PipeOrchestratorMethods:
                         )
                     except Exception as _pl_err:
                         logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
-                    async with client.beta.messages.stream(
+                    # Fast mode has its own rate limit; fail a fast request
+                    # immediately instead of letting the SDK back off, so the
+                    # 429 handler below can fall back to standard speed.
+                    _stream_client = (
+                        client.with_options(max_retries=0)
+                        if payload_for_stream.get("speed") == "fast"
+                        else client
+                    )
+                    async with _stream_client.beta.messages.stream(
                         **payload_for_stream
                     ) as stream:
                         async for event in stream:
@@ -1165,6 +1173,23 @@ class PipeOrchestratorMethods:
                         if "thinking-binding-controls-2026-08-01" not in _betas:
                             _betas.append("thinking-binding-controls-2026-08-01")
                         payload_for_stream["betas"] = _betas
+                        continue
+                    # Fast mode rate-limited (or not enabled for the org, limit 0):
+                    # retry at standard speed as the fast-mode docs recommend. The
+                    # rest of this turn's tool loop stays on standard speed; the
+                    # prompt cache misses once because speeds share no prefix.
+                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
+                        logger.warning(f"[FAST-MODE] 429 on fast request, falling back to standard speed: {e}")
+                        payload_for_stream.pop("speed", None)
+                        payload_for_stream["betas"] = [
+                            b for b in (payload_for_stream.get("betas") or [])
+                            if b != "fast-mode-2026-02-01"
+                        ]
+                        await status.notification(
+                            "Fast mode rate-limited or not enabled for this organization - "
+                            "falling back to standard speed.",
+                            type="warning",
+                        )
                         continue
                     # Finalize any open live code_exec block before handling error, so it
                     # does not stay stuck mid-render behind the error message.

@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.32`
+- **Current pipe version:** `0.9.33`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -233,7 +233,11 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.33`
+- Fast mode falls back to standard speed on a `429`. Fast requests are sent without SDK retries; when fast mode is rate-limited (or not enabled for your organization: fast mode is a research preview, limit `0`), the turn is retried at standard speed and a warning notification says so, instead of failing with "Rate limit exceeded" after several backoffs. The fallback costs one prompt-cache miss, since fast and standard requests share no cached prefix
+
 ### `v0.9.32`
+- Fixed the per-message **Fast Mode Toggle** not sending the `fast-mode-2026-02-01` beta header when the admin valve `ENABLE_FAST_MODE` is off (#52)
 - Fixed the Opus-5.5 advisor skip and the executor→advisor fallback lookup missing dated model ids. Endpoints that serve dated aliases (e.g. `claude-opus-5-5-20260215` from Azure/custom proxies) slipped past the literal `claude-opus-5-5` check, which re-enabled the advisor tool on an executor that has no valid pair and 400'd the request. Both paths now normalize the id (strip the `-YYYYMMDD` suffix) through the same helper `get_model_info` uses
 
 ### `v0.9.31`

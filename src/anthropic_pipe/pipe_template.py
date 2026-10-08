@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.32
+version: 0.9.33
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,7 +38,11 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.33
+- Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
+
 v0.9.32
+- Fixed the per-message fast-mode toggle not sending the fast-mode-2026-02-01 beta header when the admin valve ENABLE_FAST_MODE is off
 - Fixed the Opus-5.5 advisor skip and the executor->advisor fallback lookup missing dated model ids: endpoints that serve dated aliases (e.g. "claude-opus-5-5-20260215" from Azure/custom proxies) slipped past the literal "claude-opus-5-5" check, re-enabling the advisor tool on an executor with no valid pair and 400ing the request. Both now normalize the id (strip -YYYYMMDD) via the same helper get_model_info uses
 
 v0.9.31
