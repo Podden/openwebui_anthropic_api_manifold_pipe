@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.31
+version: 0.9.32
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.32
+- Fixed the Opus-5.5 advisor skip and the executor->advisor fallback lookup missing dated model ids: endpoints that serve dated aliases (e.g. "claude-opus-5-5-20260215" from Azure/custom proxies) slipped past the literal "claude-opus-5-5" check, re-enabling the advisor tool on an executor with no valid pair and 400ing the request. Both now normalize the id (strip -YYYYMMDD) via the same helper get_model_info uses
+
 v0.9.31
 - Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max
 - Sonnet 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now sends its lowest setting thinking:{"type":"between_tools"} there (no up-front thinking; notes between tool calls still arrive as thinking blocks). Like the Opus 5 disable, it is capped at effort 'high'
