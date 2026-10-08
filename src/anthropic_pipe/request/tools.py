@@ -228,11 +228,15 @@ class PipeRequestToolsMethods:
         # The advisor must be at least as capable as the executor.
         # If the pair is invalid, downgrade the advisor to the next compatible model.
         # Opus 5.5 has no row in Anthropic's advisor compatibility table
-        # (2026-09-22), so any advisor would 400 the request.
-        if __user__["valves"].ENABLE_ADVISOR_TOOL and actual_model_name == "claude-opus-5-5":
+        # (2026-09-22), so any advisor would 400 the request. Normalize first so a
+        # dated id ("claude-opus-5-5-20260215" from Azure/custom proxies) still
+        # trips both the skip guard and the executor->advisor lookup below, matching
+        # get_model_info's handling of the same ids.
+        normalized_model_name = self._normalize_model_name(actual_model_name)
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
             logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
         elif __user__["valves"].ENABLE_ADVISOR_TOOL:
-            executor_model = actual_model_name
+            executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
             # Valid advisor models per executor (advisor must be ≥ executor in capability),

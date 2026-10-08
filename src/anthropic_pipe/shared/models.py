@@ -53,6 +53,19 @@ class PipeModelSupportMethods:
 
         return info
 
+    @staticmethod
+    def _normalize_model_name(model_name: str) -> str:
+        """
+        Strip a trailing -YYYYMMDD date suffix from a model id.
+
+        Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
+        us a dated id like "claude-opus-4-6-20251022". This is the single source
+        of truth for that normalization; both capability lookups and any literal
+        model-id comparisons must go through it so dated and undated ids behave
+        identically.
+        """
+        return re.sub(r"-\d{8}$", "", model_name)
+
     @classmethod
     def get_model_info(cls, model_name: str) -> dict:
         """
@@ -65,7 +78,7 @@ class PipeModelSupportMethods:
         # Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
         # us a dated id like "claude-opus-4-6-20251022". Strip the -YYYYMMDD suffix
         # and retry both the API cache and the capability overrides with the base id.
-        normalized = re.sub(r"-\d{8}$", "", model_name)
+        normalized = cls._normalize_model_name(model_name)
         if normalized != model_name and normalized in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[normalized]
 

@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.31`
+- **Current pipe version:** `0.9.32`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -233,6 +233,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.32`
+- Fixed the Opus-5.5 advisor skip and the executor→advisor fallback lookup missing dated model ids. Endpoints that serve dated aliases (e.g. `claude-opus-5-5-20260215` from Azure/custom proxies) slipped past the literal `claude-opus-5-5` check, which re-enabled the advisor tool on an executor that has no valid pair and 400'd the request. Both paths now normalize the id (strip the `-YYYYMMDD` suffix) through the same helper `get_model_info` uses
+
 ### `v0.9.31`
 - Added **Claude Sonnet 5.5** (`claude-sonnet-5-5`): 1M context, 128k output, adaptive thinking on by default, full effort ladder including `max`
 - Sonnet 5.5 rejects `thinking: {"type": "disabled"}`. The Thinking Toggle / `ENABLE_THINKING=off` now sends its lowest setting there, `thinking: {"type": "between_tools"}`: no up-front thinking, while the notes between tool calls still arrive as thinking blocks. Like the Opus 5 disable, it is capped at effort `high`

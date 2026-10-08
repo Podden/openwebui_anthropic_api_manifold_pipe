@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.31
+version: 0.9.32
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.32
+- Fixed the Opus-5.5 advisor skip and the executor->advisor fallback lookup missing dated model ids: endpoints that serve dated aliases (e.g. "claude-opus-5-5-20260215" from Azure/custom proxies) slipped past the literal "claude-opus-5-5" check, re-enabling the advisor tool on an executor with no valid pair and 400ing the request. Both now normalize the id (strip -YYYYMMDD) via the same helper get_model_info uses
+
 v0.9.31
 - Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max
 - Sonnet 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now sends its lowest setting thinking:{"type":"between_tools"} there (no up-front thinking; notes between tool calls still arrive as thinking blocks). Like the Opus 5 disable, it is capped at effort 'high'
@@ -6123,11 +6126,15 @@ class Pipe:
         # The advisor must be at least as capable as the executor.
         # If the pair is invalid, downgrade the advisor to the next compatible model.
         # Opus 5.5 has no row in Anthropic's advisor compatibility table
-        # (2026-09-22), so any advisor would 400 the request.
-        if __user__["valves"].ENABLE_ADVISOR_TOOL and actual_model_name == "claude-opus-5-5":
+        # (2026-09-22), so any advisor would 400 the request. Normalize first so a
+        # dated id ("claude-opus-5-5-20260215" from Azure/custom proxies) still
+        # trips both the skip guard and the executor->advisor lookup below, matching
+        # get_model_info's handling of the same ids.
+        normalized_model_name = self._normalize_model_name(actual_model_name)
+        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
             logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
         elif __user__["valves"].ENABLE_ADVISOR_TOOL:
-            executor_model = actual_model_name
+            executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
             # Valid advisor models per executor (advisor must be ≥ executor in capability),
@@ -8277,6 +8284,19 @@ class Pipe:
 
         return info
 
+    @staticmethod
+    def _normalize_model_name(model_name: str) -> str:
+        """
+        Strip a trailing -YYYYMMDD date suffix from a model id.
+
+        Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
+        us a dated id like "claude-opus-4-6-20251022". This is the single source
+        of truth for that normalization; both capability lookups and any literal
+        model-id comparisons must go through it so dated and undated ids behave
+        identically.
+        """
+        return re.sub(r"-\d{8}$", "", model_name)
+
     @classmethod
     def get_model_info(cls, model_name: str) -> dict:
         """
@@ -8289,7 +8309,7 @@ class Pipe:
         # Endpoints that don't serve dated aliases (Azure/custom proxies) may hand
         # us a dated id like "claude-opus-4-6-20251022". Strip the -YYYYMMDD suffix
         # and retry both the API cache and the capability overrides with the base id.
-        normalized = re.sub(r"-\d{8}$", "", model_name)
+        normalized = cls._normalize_model_name(model_name)
         if normalized != model_name and normalized in cls._api_capabilities_cache:
             return cls._api_capabilities_cache[normalized]
 
