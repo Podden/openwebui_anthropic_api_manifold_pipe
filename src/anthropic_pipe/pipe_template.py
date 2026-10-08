@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.33
+version: 0.9.34
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.34
+- Added an estimated USD cost per turn (new SHOW_COST user valve): reported as `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage, so it shows in the message info tooltip and is persisted for analytics, and appended to the SHOW_TOKEN_COUNT status line. Anthropic exposes no pricing via the API, so prices come from a built-in list-price table; admins can patch it without a release via the new MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes are split 5m/1h from usage.cache_creation, fast mode and US data residency are detected from the response usage, and web searches are added at $10 per 1,000
+- The price table covers the 5.5 generation: Opus 5.5 ($4 / $20, fast $8 / $40) and Sonnet 5.5 ($2 / $10) with their 0.05x cache reads, and Haiku 5.5's prompt-length tiers ($0.10 / $0.50 up to 100k prompt tokens, $0.50 / $2.50 above), decided per API call
+- Speed is priced per API call too, so a turn that falls back from fast to standard speed after a 429 is billed at fast rates only for the calls that actually ran fast
+
 v0.9.33
 - Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
 
@@ -1266,6 +1272,9 @@ class PipeRequestContext:
 # BEGIN GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
+# END GENERATED SECTION: anthropic_pipe.shared.pricing
+
 
 
 
@@ -1683,6 +1692,18 @@ class Pipe:
             "Changing the API key, base URL, workspace or ENABLED_MODELS always "
             "refreshes immediately, regardless of this setting.",
         )
+        MODEL_PRICING_OVERRIDES: str = Field(
+            default="",
+            description="JSON patch for the built-in price table used by the SHOW_COST estimate, in USD per "
+            "million tokens, keyed by model id. Keys: input, output, cache_write_5m, cache_write_1h, "
+            "cache_read, fast_input, fast_output; omitted cache rates derive from `input` at Anthropic's "
+            "standard multipliers (1.25x / 2x / 0.1x). Prompt-length pricing (Haiku 5.5): "
+            "long_context_threshold plus long_input / long_output (long_cache_* optional), applied to every "
+            "API call whose prompt exceeds the threshold. Example: "
+            '{"claude-sonnet-5": {"input": 3, "output": 15}, "my-proxy-model": {"input": 1, "output": 5}}. '
+            "Anthropic does not publish prices through the API, so this is how to track price changes "
+            "or a negotiated rate without waiting for a pipe release.",
+        )
 
     class UserValves(BaseModel):
         ANTHROPIC_API_KEY: EncryptedStr = Field(
@@ -1751,6 +1772,15 @@ class Pipe:
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
+        )
+        SHOW_COST: bool = Field(
+            default=True,
+            description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
+            "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
+            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
+            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
+            "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
         )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,

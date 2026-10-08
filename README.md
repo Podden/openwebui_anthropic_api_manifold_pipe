@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.33`
+- **Current pipe version:** `0.9.34`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -127,6 +127,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `TOOL_CALL_TIMEOUT` | `30` | Per-tool execution timeout in seconds |
 | `ENABLE_CACHE_DIAGNOSTICS` | `false` | Logs cache-prefix diffs between turns. Debugging only |
 | `MODEL_CACHE_TTL_MINUTES` | `1440` | How long the discovered model list is cached (`0` = re-fetch on every model list render). Changing API key, base URL, workspace or `ENABLED_MODELS` refreshes immediately regardless |
+| `MODEL_PRICING_OVERRIDES` | `""` | JSON patch for the built-in price table behind `SHOW_COST`, in USD per million tokens keyed by model id, e.g. `{"claude-sonnet-5": {"input": 3, "output": 15}}`. Keys: `input`, `output`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `fast_input`, `fast_output`; omitted cache rates derive from `input` at 1.25x / 2x / 0.1x. Prompt-length pricing (Haiku 5.5) adds `long_context_threshold` plus `long_input` / `long_output` (`long_cache_*` optional), applied to every API call whose prompt exceeds the threshold. Anthropic publishes no prices through the API, so this is how to track price changes, negotiated rates or proxy models without a pipe release |
 
 #### `CACHE_CONTROL` options
 
@@ -150,6 +151,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `EFFORT` | `high` | `low`, `medium`, `high`, `xhigh`, `max` (clamped by model support; also settable via OpenWebUI's `reasoning_effort`) |
 | `HIDE_BLOCKS` | `[]` | Multiselect: block types to hide from the chat display while still replaying them to the API — `web_search`, `web_fetch`, `tool_search`, `advisor`, `code_execution`, `compaction` |
 | `SHOW_TOKEN_COUNT` | `Off` | `Off`, `On`, or `With Cache` (adds cache read/write tokens and call count) |
+| `SHOW_COST` | `true` | Reports the estimated USD list-price cost of the turn as `cost_usd` plus a per-component `cost_breakdown_usd` (`input`, `output`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `web_search`) in the message usage (shown in the message info tooltip, persisted for analytics) and appends it to the `SHOW_TOKEN_COUNT` line (`💵 ≈$0.012`). Covers uncached input, output, 5m/1h cache writes, cache reads, fast mode, US data residency and web searches; models without a known rate card report nothing |
 | `TOOL_RESULT_MAX_TOKENS` | `50000` | Backstop truncation for oversized text tool results (`0` disables). Image blocks are exempt |
 
 #### Search, files, and skills
@@ -233,6 +235,12 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.34`
+- Added an **estimated USD cost per turn** (new `SHOW_COST` user valve, on by default): reported as `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage — so it shows in the message info tooltip and is persisted for the analytics page — and appended to the `SHOW_TOKEN_COUNT` status line. Anthropic exposes no pricing through the API — `/v1/models` carries capabilities and limits only — so prices come from a built-in list-price table; admins can patch or extend it without a release via the new `MODEL_PRICING_OVERRIDES` valve
+- The estimate follows the actual bill: cache writes are split 5m/1h from `usage.cache_creation`, fast mode and US data residency are read from the response `usage` (not from the valves that requested them), and web searches are added at $10 per 1,000
+- The price table covers the 5.5 generation: Opus 5.5 ($4 / $20, fast $8 / $40) and Sonnet 5.5 ($2 / $10) with their 0.05x cache reads, and Haiku 5.5's prompt-length tiers ($0.10 / $0.50 up to 100k prompt tokens, $0.50 / $2.50 above), decided per API call
+- Speed is priced per API call too, so a turn that falls back from fast to standard speed after a `429` is billed at fast rates only for the calls that actually ran fast
+
 ### `v0.9.33`
 - Fast mode falls back to standard speed on a `429`. Fast requests are sent without SDK retries; when fast mode is rate-limited (or not enabled for your organization: fast mode is a research preview, limit `0`), the turn is retried at standard speed and a warning notification says so, instead of failing with "Rate limit exceeded" after several backoffs. The fallback costs one prompt-cache miss, since fast and standard requests share no cached prefix
 
