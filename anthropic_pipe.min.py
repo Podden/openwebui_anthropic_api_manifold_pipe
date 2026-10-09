@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.33
+version: 0.9.34
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.34
+- Fast-mode 429 fallback now only degrades to standard speed when the fast-mode bucket is actually the one that tripped. A 429 is treated as fast-mode-specific only when the dedicated anthropic-fast-*-tokens-* headers show the fast bucket exhausted (remaining 0) or disabled (limit 0), or - when no fast headers are present - the error names fast mode. An org-wide/account rate limit that merely coincided with a fast request no longer silently pins the rest of the turn to standard speed or shows a false "fast mode rate-limited" warning; it falls through to the normal rate-limit handling instead
+
 v0.9.33
 - Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
 
@@ -8659,8 +8662,12 @@ class Pipe:
                         payload_for_stream["betas"] = _betas
                         continue
 
-                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
-                        logger.warning(f"[FAST-MODE] 429 on fast request, falling back to standard speed: {e}")
+                    if (
+                        isinstance(e, RateLimitError)
+                        and payload_for_stream.get("speed") == "fast"
+                        and self._is_fast_mode_rate_limit(e)
+                    ):
+                        logger.warning(f"[FAST-MODE] fast-mode 429, falling back to standard speed: {e}")
                         payload_for_stream.pop("speed", None)
                         payload_for_stream["betas"] = [
                             b for b in (payload_for_stream.get("betas") or [])
@@ -8672,6 +8679,12 @@ class Pipe:
                             type="warning",
                         )
                         continue
+                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
+
+                        logger.warning(
+                            f"[FAST-MODE] 429 on fast request but not fast-mode-specific "
+                            f"(likely org-wide); not degrading speed: {e}"
+                        )
 
                     await _finalize_open_code_block(request_ctx)
                     server_tool_state.current_code = ""
@@ -8932,6 +8945,49 @@ class Pipe:
             return completion
 
         return final_text()
+
+    def _is_fast_mode_rate_limit(self, exc: Exception) -> bool:
+        headers: dict[str, str] = {}
+        response = getattr(exc, "response", None)
+        raw_headers = getattr(response, "headers", None)
+        if raw_headers is not None:
+            try:
+                headers = {str(k).lower(): v for k, v in raw_headers.items()}
+            except Exception:
+                headers = {}
+
+        def _as_int(value: Any) -> Optional[int]:
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        remaining_keys = (
+            "anthropic-fast-input-tokens-remaining",
+            "anthropic-fast-output-tokens-remaining",
+        )
+        limit_keys = (
+            "anthropic-fast-input-tokens-limit",
+            "anthropic-fast-output-tokens-limit",
+        )
+        fast_header_present = any(k in headers for k in remaining_keys + limit_keys)
+
+        for key in remaining_keys + limit_keys:
+            value = _as_int(headers.get(key))
+            if value is not None and value <= 0:
+                return True
+
+        if fast_header_present:
+
+            return False
+
+        message = (getattr(exc, "message", "") or "") or str(exc) or ""
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                message = f"{message} {error.get('message', '')}"
+        return "fast" in message.lower()
 
     async def _create_payload(
         self,

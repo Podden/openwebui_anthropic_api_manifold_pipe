@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.33`
+- **Current pipe version:** `0.9.34`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -233,6 +233,9 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.34`
+- The fast-mode `429` fallback now only drops to standard speed when the **fast-mode bucket** is actually what tripped. A `429` counts as fast-mode-specific only when the dedicated `anthropic-fast-*-tokens-*` headers show the fast bucket exhausted (`remaining 0`) or disabled (`limit 0`) — or, if no fast headers are present, the error itself names fast mode. An org-wide/account rate limit that merely coincides with a fast request no longer silently pins the rest of the turn to standard speed or shows a misleading "Fast mode rate-limited" warning; it falls through to the normal rate-limit handling and is reported accurately
+
 ### `v0.9.33`
 - Fast mode falls back to standard speed on a `429`. Fast requests are sent without SDK retries; when fast mode is rate-limited (or not enabled for your organization: fast mode is a research preview, limit `0`), the turn is retried at standard speed and a warning notification says so, instead of failing with "Rate limit exceeded" after several backoffs. The fallback costs one prompt-cache miss, since fast and standard requests share no cached prefix
 
