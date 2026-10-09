@@ -1178,8 +1178,21 @@ class PipeOrchestratorMethods:
                     # retry at standard speed as the fast-mode docs recommend. The
                     # rest of this turn's tool loop stays on standard speed; the
                     # prompt cache misses once because speeds share no prefix.
-                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
-                        logger.warning(f"[FAST-MODE] 429 on fast request, falling back to standard speed: {e}")
+                    #
+                    # Only degrade when the *fast-mode* bucket is actually the one
+                    # that tripped. A fast request can also catch an org-wide 429
+                    # (account/tier limit) that has nothing to do with fast mode;
+                    # popping `speed` there would silently pin the whole turn to
+                    # standard speed (the branch can never fire again) and show the
+                    # user a false "fast mode rate-limited" cause. Fast mode exposes
+                    # dedicated anthropic-fast-*-tokens-* headers, so we can tell the
+                    # two apart and leave an org-wide limit to the generic handler.
+                    if (
+                        isinstance(e, RateLimitError)
+                        and payload_for_stream.get("speed") == "fast"
+                        and self._is_fast_mode_rate_limit(e)
+                    ):
+                        logger.warning(f"[FAST-MODE] fast-mode 429, falling back to standard speed: {e}")
                         payload_for_stream.pop("speed", None)
                         payload_for_stream["betas"] = [
                             b for b in (payload_for_stream.get("betas") or [])
@@ -1191,6 +1204,14 @@ class PipeOrchestratorMethods:
                             type="warning",
                         )
                         continue
+                    if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":
+                        # 429 on a fast request whose fast-mode bucket still has
+                        # budget -> an org-wide limit. Don't degrade or mislabel;
+                        # let the generic rate-limit path below report it.
+                        logger.warning(
+                            f"[FAST-MODE] 429 on fast request but not fast-mode-specific "
+                            f"(likely org-wide); not degrading speed: {e}"
+                        )
                     # Finalize any open live code_exec block before handling error, so it
                     # does not stay stuck mid-render behind the error message.
                     await _finalize_open_code_block(request_ctx)
@@ -1534,3 +1555,60 @@ class PipeOrchestratorMethods:
             return completion
 
         return final_text()
+
+    def _is_fast_mode_rate_limit(self, exc: Exception) -> bool:
+        """Whether a 429 is specific to the fast-mode (priority) token bucket.
+
+        Fast mode has its own rate limit, surfaced through dedicated response
+        headers (``anthropic-fast-input-tokens-{limit,remaining,reset}`` and the
+        matching ``-output-`` set). A fast-mode-specific 429 is one where that
+        bucket is exhausted (``remaining <= 0``) or disabled / not enabled for
+        the org (``limit <= 0``). When the fast headers are present but still
+        report budget, the 429 came from a different (org-wide) bucket and is
+        NOT fast-mode-specific. When no fast headers are present at all we fall
+        back to the error body/message, which names fast mode for fast-specific
+        limits but not for a generic org-wide 429.
+        """
+        headers: dict[str, str] = {}
+        response = getattr(exc, "response", None)
+        raw_headers = getattr(response, "headers", None)
+        if raw_headers is not None:
+            try:
+                headers = {str(k).lower(): v for k, v in raw_headers.items()}
+            except Exception:
+                headers = {}
+
+        def _as_int(value: Any) -> Optional[int]:
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        remaining_keys = (
+            "anthropic-fast-input-tokens-remaining",
+            "anthropic-fast-output-tokens-remaining",
+        )
+        limit_keys = (
+            "anthropic-fast-input-tokens-limit",
+            "anthropic-fast-output-tokens-limit",
+        )
+        fast_header_present = any(k in headers for k in remaining_keys + limit_keys)
+
+        for key in remaining_keys + limit_keys:
+            value = _as_int(headers.get(key))
+            if value is not None and value <= 0:
+                return True
+
+        if fast_header_present:
+            # Fast bucket still has budget -> some other (org-wide) bucket tripped.
+            return False
+
+        # No fast-mode headers: trust the error text, which references fast mode
+        # for fast-specific limits but not for a generic org-wide 429.
+        message = (getattr(exc, "message", "") or "") or str(exc) or ""
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                message = f"{message} {error.get('message', '')}"
+        return "fast" in message.lower()

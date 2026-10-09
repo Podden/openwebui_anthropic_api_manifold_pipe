@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.33
+version: 0.9.34
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,9 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog:
+v0.9.34
+- Fast-mode 429 fallback now only degrades to standard speed when the fast-mode bucket is actually the one that tripped. A 429 is treated as fast-mode-specific only when the dedicated anthropic-fast-*-tokens-* headers show the fast bucket exhausted (remaining 0) or disabled (limit 0), or - when no fast headers are present - the error names fast mode. An org-wide/account rate limit that merely coincided with a fast request no longer silently pins the rest of the turn to standard speed or shows a false "fast mode rate-limited" warning; it falls through to the normal rate-limit handling instead
+
 v0.9.33
 - Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
 
