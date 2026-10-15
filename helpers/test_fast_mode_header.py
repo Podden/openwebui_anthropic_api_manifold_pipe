@@ -38,6 +38,12 @@ def _load_module():
     # never actually reach the branch that reads it (no __files__ passed),
     # but set it defensively so the name always exists.
     module.FILES_AVAILABLE = False
+    # Like the compiled artifact, payload.py resolves StatusEmitter from module scope.
+    status_path = MODULE_PATH.parents[1] / "response" / "status_events.py"
+    status_spec = importlib.util.spec_from_file_location("_status_events", status_path)
+    status_module = importlib.util.module_from_spec(status_spec)
+    status_spec.loader.exec_module(status_module)
+    module.StatusEmitter = status_module.StatusEmitter
     return module
 
 

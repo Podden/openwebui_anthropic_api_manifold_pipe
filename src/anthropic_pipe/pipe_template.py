@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.33
+version: 0.9.39
 license: MIT
 requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
 environment_variables:
@@ -29,7 +29,6 @@ Supports:
 - Code Execution Tool
 - Compaction
 - Vision
-- Context Editing (clear tool results and thinking blocks)
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
@@ -37,527 +36,23 @@ Supports:
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
-Changelog:
-v0.9.33
-- Fast mode falls back to standard speed on a 429: the fast request is sent without SDK retries, and a fast-mode rate limit (or an organization without fast-mode access, limit 0) retries the turn at standard speed with a warning notification instead of failing after three backoffs
+Changelog (older versions: CHANGELOG.md in the repository):
+v0.9.39
+- Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on.
+- Prompt cache kept for tool calls with two or more arguments (e.g. tool search's query + limit): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: messages_changed).
+- A server tool the model calls right after a client tool in the same response (e.g. bash after view_knowledge_file) stays in that assistant message on replay instead of moving into the next one.
+- Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool.
+- Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead.
+- CACHE-DIFF debug log no longer reports block key-order differences as breaks; the API ignores them (measured), only tool `input` order counts. The [PAYLOAD] log line lists deferred tools.
+
+v0.9.38
+- Estimated USD cost per turn (new SHOW_COST user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the SHOW_TOKEN_COUNT status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
+
+v0.9.37
+- Removed the beta headers of features Anthropic made generally available (effort, code execution 20250825, web fetch 20250910, tool search / programmatic tool calling, prompt caching); verified live without them.
+- Removed context editing (CONTEXT_EDITING_* user valves): off by default and it invalidated the prompt cache whenever it cleared. Compaction stays.
 
-v0.9.32
-- Fixed the per-message fast-mode toggle not sending the fast-mode-2026-02-01 beta header when the admin valve ENABLE_FAST_MODE is off
-- Fixed the Opus-5.5 advisor skip and the executor->advisor fallback lookup missing dated model ids: endpoints that serve dated aliases (e.g. "claude-opus-5-5-20260215" from Azure/custom proxies) slipped past the literal "claude-opus-5-5" check, re-enabling the advisor tool on an executor with no valid pair and 400ing the request. Both now normalize the id (strip -YYYYMMDD) via the same helper get_model_info uses
-
-v0.9.31
-- Added Claude Sonnet 5.5 (claude-sonnet-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max
-- Sonnet 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now sends its lowest setting thinking:{"type":"between_tools"} there (no up-front thinking; notes between tool calls still arrive as thinking blocks). Like the Opus 5 disable, it is capped at effort 'high'
-- Sonnet 5.5 rejects forced tool_choice ("tool" / "any"): degraded to "auto", same as Opus 5.5 / Fable 5.1
-- Advisor pairs for a Sonnet 5.5 executor: Opus 5.5, Opus 5, Sonnet 5.5, Fable 5 / 5.1, Mythos 5 / 5.1. Opus 5.5 is now selectable as ADVISOR_MODEL
-- The drop_block retry for changed prompt prefixes is skipped for between_tools requests, which accept no other thinking field
-- Sonnet 5.5 added to REFUSAL_FALLBACK and MEMORY_REVIEW_MODEL
-- Added Claude Haiku 5.5 (claude-haiku-5-5): 1M context, 128k output, adaptive thinking on by default, full effort ladder incl. max. Thinking off sends thinking:{"type":"disabled"} (capped at effort 'high'); forced tool_choice keeps working
-- Haiku 5.5 has no server-side refusal fallback (a pinned fallback model 400s), so REFUSAL_FALLBACK is skipped for it
-- Advisor pairs for a Haiku 5.5 executor: Opus 5.5 / 5 / 4.8 / 4.7, Fable 5 / 5.1, Mythos 5 / 5.1, Sonnet 5.5 / 5, Haiku 5.5
-- Haiku 5.5 added to MEMORY_REVIEW_MODEL and is now its default (about a tenth of Haiku 4.5's price)
-
-v0.9.30
-- Added Claude Opus 5.5 (claude-opus-5-5): 1M context, 128k output, always-on adaptive thinking, full effort ladder incl. max, fast mode
-- Opus 5.5 rejects thinking:{"type":"disabled"}: the Thinking Toggle / ENABLE_THINKING=off now lowers effort to 'low' there instead of disabling thinking
-- Opus 5.5 rejects forced tool_choice ("tool" / "any"), same handling as Fable 5.1: degraded to "auto"
-- thinking.block_binding "drop_block" is no longer sent up front. On accounts created before 2026-08-31 it opted every request in to the prefix check and dropped thinking blocks the model could otherwise still read. Newer accounts get a 400 for a changed prefix instead; the pipe now retries that request once with drop_block, so the turn still goes through
-- THINKING_DISPLAY 'updates' also covers Opus 5.5, where the notes between tool calls arrive as thinking blocks and stay empty at 'omitted'. Its beta header is now sent whenever 'updates' is used
-- Opus 5.5 is not a valid advisor pair yet: the advisor tool is skipped on that executor instead of 400ing
-
-v0.9.29
-- Added Claude Fable 5.1 / Mythos 5.1 to the capability overrides, output/context fallbacks and the advisor model list (128k output, 1M context, adaptive thinking, compaction, structured outputs)
-- tool_choice "tool"/"any" is no longer sent to models that reject it: Fable 5.1 and Mythos 5.1 return a 400 for forced tool use, so web-search enforcement and forced tool_choice from the request body degrade to "auto" on them (logged) instead of failing the request
-- Thinking blocks replayed to Fable 5.1 are bound to the request prefix (system, tools, earlier messages). OpenWebUI changes that prefix between turns (memory/RAG appendix, tool toggles, context compaction summary), so the pipe now sends thinking.block_binding.prefix_mismatch_behavior "drop_block" (beta thinking-binding-controls-2026-08-01) and logs the input_transformations the API reports instead of surfacing a 400
-- THINKING_DISPLAY accepts "updates" (beta thinking-display-updates-2026-08-18): reasoning stays hidden, the one-line progress updates Fable 5 / 5.1 write before a tool call are shown as thinking text
-- ENABLE_COMPACTION steps aside when OpenWebUI's own Context Compaction (0.11.3+, Admin > Interface) has already summarized the chat: its "[CONVERSATION SUMMARY]" marker in the system prompt disables the API-side compaction for that request, so the two never run on the same conversation. The valve description says so
-
-v0.9.28
-- Fixed every tool being deferred for tool search regardless of the exclude list: TOOL_SEARCH_EXCLUDE_TOOLS is a List[str], but its default shipped as a single multi-line comma-separated blob inside a one-element list, so the `name not in excludes` test never matched anything. Anthropic server tools and even the tool_search tool itself were deferred. On endpoints that do not implement deferred loading (litellm/Bedrock and other proxies) this produced a hard 400, "tool_use ids were found without tool_result blocks" (#44, reported by @icsy7867)
-- TOOL_SEARCH_EXCLUDE_TOOLS is now a multiselect with a real list default; comma-separated and legacy blob values still load
-- Raised the max_tokens fallback for unrecognised model ids from 4096 to 64000. Proxies that rename models (litellm/Bedrock ids such as "us.anthropic.claude-sonnet-5-v1:0") miss the lookup table and landed on a ceiling every current Claude far exceeds, truncating long answers (#43, reported by @icsy7867)
-- The truncation notice no longer says "Claude has Reached the maximum token limit!". That reads as a full context window and sent people auditing their conversation; it now names the actual output limit and its value
-- Fixed a truncated answer being retried up to MAX_RETRIES times: stop_reason "max_tokens" did not end the turn, so it fell through to the truncated-stream retry and replayed the whole request, each attempt stopping at the same ceiling and each one billed
-- Non-streaming requests that carry their own `tools` in the body now return a real OpenAI `tool_calls` array with finish_reason "tool_calls" instead of the arguments serialized into message.content with finish_reason "stop". Callers that read message.tool_calls (generate_chat_completion consumers, sub-agent tools) saw a tool call as prose and stopped after one iteration. Streaming behaviour is unchanged (#35, reported by @kdo-jl)
-- Tools passed in body.tools are no longer deferred for tool search. The caller runs them itself, so making the model look them up first only added an API round trip before it could answer (#35)
-- Added a Fast Mode toggle filter (anthropic_pipe_fast_toggle.py) for per-message fast requests on Opus 5 / 4.8, next to the existing admin valve. Speed against depth is a per-request trade; the toggle is ignored on models without fast mode rather than failing the request (#50, requested by @Willian-Zhang)
-
-v0.9.27
-- Fixed model display names being lost while the model list is served from cache: the cached entries were built without the stored `_display_name`, so the picker fell back to raw ids for the whole cache TTL (#47, reported by @clang13)
-- Fixed a follow-up request 400 ("tool use found without a corresponding tool_result block") after a turn with several Anthropic-hosted code-execution calls: the stored carriers interleave, and replaying them in document order separated a server_tool_use from its result. Results are now pulled forward next to their tool_use (#40, by @JaWoDigiB)
-- Fixed error notices and the File Content collapsible being swallowed into the preceding paragraph: code-execution / text-editor errors and safety refusals now go through the same own-line guarantee as every other rendered block (#46, by @Willian-Zhang)
-- Fixed an empty SKILLS valve triggering the code_execution notification: OpenWebUI stores an empty array valve as "", which round-trips back as [""], and that is truthy. Blank entries are now dropped (#48, reported by @clang13)
-
-v0.9.26
-- Added human-in-the-loop tool approval (OpenWebUI 0.11.1). OpenWebUI enforces its gate inside its own tool loop, which a manifold never enters, so the setting silently did nothing here: with approval set to "ask", every client, builtin and Open Terminal tool call now waits for allow/deny, and a denial goes back to the model as a normal tool result so the turn continues
-- Fixed a client tool failing outright on an argument its schema does not declare (observed: `{"params": "{}"}` for a parameterless tool, streamed by the API itself). Undeclared keys are dropped before the call, as OpenWebUI does in its own loop
-- HIDE_BLOCKS is now a multiselect instead of a comma-separated string; existing string values still load
-- Fixed HIDE_BLOCKS never hiding code execution: the collapsible ignored the valve, and the bash / text editor variants were not recognised as the same block
-- Fixed total_tokens double-counting cache traffic; now input + output, matching OpenWebUI's usage contract, with cache reads and writes in their own two fields
-- Added ask_user (OpenWebUI 0.11.1) to the tool-search exclude list
-
-v0.9.25
-- The Anthropic API key valve (admin and per-user) is now stored encrypted, using Fernet with a key derived from WEBUI_SECRET_KEY. OpenWebUI's own valve encryption is opt-in (ENABLE_VALVE_ENCRYPTION, off by default), so on a default install the key otherwise sits in the functions table in plaintext. Where that flag is on, the pipe defers to OpenWebUI rather than encrypting twice. Existing plaintext keys keep working -- no migration step
-- Debug logs now start with the detected OpenWebUI version, and no longer contain the API key in plaintext
-- Added MODEL_CACHE_TTL_MINUTES valve (default 1440 = 24h, 0 disables caching). The 24h TTL was hardcoded, so a newly released Claude model could not be picked up without restarting OpenWebUI
-- Fixed the model cache surviving a connection change: the cached list is now fingerprinted against API key, base URL, workspace id and ENABLED_MODELS. Repointing the pipe at a different endpoint used to keep serving the previous endpoint's models
-- A failed model refresh no longer falls back to a cache that was fetched from different connection settings
-
-v0.9.24
-- Fixed the context-window reading OpenWebUI uses for auto-compaction: prompt_tokens/completion_tokens now carry the last call's full input (uncached + cache writes + cache reads) instead of being absent. input_tokens/output_tokens stay cumulative and uncached-only, so cost and the analytics page are unchanged. Under caching the old numbers understated occupancy badly, and compaction fired far too late or never
-- Sub-agent runs (OpenWebUI 0.11) now return plain prose: no collapsibles, no replay carriers, no token footer, no metadata markers. Their text is pasted into the parent agent's context, where all of that is pure token cost
-- Task models (title, tags, follow-ups, queries, image prompts, autocomplete, memory review) now pin their response shape with structured outputs, so a stray markdown fence can no longer cost OpenWebUI the whole task
-- Added the OpenWebUI 0.11 builtin tools to the tool-search exclude list: notify, timer, delegate_task, list_chat_files, grep_chat_files, query_chat_files
-- Fixed sampling params being sent to adaptive-thinking models on endpoints that report no capability metadata (Azure and other proxies, manual ENABLED_MODELS ids), which the API answers with a 400 (#36, reported by @attilaolah)
-- Corrected stale static model limits: Opus 4.6/4.7/4.8 and Sonnet 4.6 serve 128k output (were listed at 64k), Sonnet 4.5 serves a 1M window, and the 1M window no longer needs a beta header
-- Bumped the required Anthropic SDK to 0.121.0
-
-v0.9.23
-- Added Claude Opus 5 (claude-opus-5): 1M context, 128k output, thinking on by default, full effort ladder incl. max, fast mode (#45, by @AliD101v)
-- Thinking Toggle now works on thinking-on-by-default models (Opus 5 / Sonnet 5): turning it off sends thinking:{"type":"disabled"} instead of just omitting the field, and clamps effort to 'high' because Opus 5 rejects disabled thinking at xhigh/max
-- Added REFUSAL_FALLBACK valve: retry a safety-refused request server-side, either on Anthropic's per-category recommendation ('default') or on a pinned model
-- Removed Fast Mode for Opus 4.7 (2026-07-24): speed:"fast" now errors there instead of falling back to standard speed
-- Fixed a prompt-cache killer: user tools are now appended name-sorted. OpenWebUI's tool order shifts on its own (toggling a tool appends it to the end of selectedToolIds, a page reload resets it to the model's order, MCP servers return any order), and the same tool set in a different order rebuilt the entire cache
-- Bumped the required Anthropic SDK to 0.120.0
-- Advisor and memory-review model lists know about Opus 5; advisor now defaults to it
-
-v0.9.22
-- Added Compatibility for OpenWebUI's ENABLE_MEMORY_BACKGROUND_REVIEW: task requests now forward their system prompt instead of dropping it, so the memory reviewer gets its "return only valid JSON" instruction
-- Added MEMORY_REVIEW_MODEL valve to run the background memory review on a cheap model (default Haiku) instead of the chat model
-- Task requests (title, tags, follow-ups, memory review) are stripped down to plain prose: no collapsibles, no cache diagnostics, no replay carriers, no inline markers
-- HIDE_BLOCKS moved from the admin Valves to the UserValves — hiding a collapsible is a personal display preference
-
-v0.9.21
-- Added HIDE_BLOCKS valve to individually hide details in the conversation: Known values: web_search, web_fetch, tool_search, advisor, code_execution, compaction
-- Added CACHE_TTL_FOR_TOOLS_AND_SYSTEM_PROMT valve to separately cache System Prompt and Tools Array for an hour (useful for big multi-user setups)
-- Added Compatibility for new OpenWebUI Memory System Format so cache stays stable
-- Added cached-% and a call count for multi-call turns on Token display
-- Fixed markdown breaking at text content_block boundaries
-- CACHE-DIFF logging is breakpoint-aware and no longer reports the per-request memory/RAG appendix as a cache break when the API sees none
-
-v0.9.20
-- Fixed a "API key is invalid" error when using ANTHROPIC KEY Valve
-
-v0.9.19
-- Removed static ANTHROPIC_BUILTIN_TOOL_NAMES in favor of default TOOL_SEARCH_EXCLUDE_TOOLS including all openwebui internal tools
-- Fixed open-terminal tool calls and read_file bugs, experimental bash and text_editor tool support seems to work now, needs further testing
-- Fixed token explosion on requests containing images and binary files from older read_file tool calls from open-terminal
-
-v0.9.18
-- Client tool results containing base64 image data now correctly get's converted in Anthropic image blocks instead of raw base64 TEXT
-- Use of native open-webui image compression user settings in image blocks
-- Added Claude Sonnet 5 (claude-sonnet-5): 1M context, 128k output, adaptive thinking on by default
-- Removed Fast Mode for Opus 4.6
-- Experimental Claude on AWS Support: use ANTHROPIC_WORKSPACE_ID Valve to try it out
-- Added ENABLED_MODELS valve + date-suffix normalization + static model fallback for endpoints without /v1/models (Azure/proxies)
-- Added ANTHROPIC_API_KEY Enviromental Variable readout for easier configuration
-- Increased the max-output-token fallback, 4096 is indeed to low :)
-- Fixed File Downloading from code_execution container using Anthropic Files API
-
-v0.9.17
-- Added Fable and Mythos as advisor models
-- Advisor Models is now dynamically adjusted to the next best model if not compatible
-
-v0.9.16
-- Added Claude Fable and Mythos 5 alongside new stop_reasons and refusals
-
-v0.9.15
-- Fixed Newline after Citations
-- Fixed Tool calling error when tools payload changes while old tool results are still present in previous answers
-- Fixed Stop Handling
-- Fixed Status Emitting for Tool Search and Advisor
-
-v0.9.14
-- Added Claude Opus 4.8
-- Promt caching bugfixes when using native PDF Upload and Images
-
-v0.9.13
-- Token counting is now Claude-Code-style: `total_tokens` only counts NEW tokens (uncached input + cache_creation + output) instead of all tokens
-- Added `ENABLE_CACHE_DIAGNOSTICS` valve for debug purposes
-
-v0.9.12
-- Refactored the pipe into modular source files under `src/anthropic_pipe/`.
-- Extracted request payload creation into `request_payload.py` for cache/debug work.
-- Split streaming content-block handling into per-content modules and added a build step that compiles/minifies the OpenWebUI single-file artifact before deploy.
-- Fixed Anthropic API Skills container payload shape and added clearer Files API / code execution guidance.
-
-v0.9.11
-- Added async handling for run_command <-> bash tool
-- Added all anthropic server tools as TOOL_SEARCH_EXCLUDE_TOOLS
-
-v0.9.10
-- Added Experimental path for using Anthropics native (`bash_20250124`) to use with OpenTerminal. Use Valve `ENABLE_BASH_TOOL`
-- Added Experimental path for using Anthripics native (`text_editor_20250728` / `str_replace_based_edit_tool`) tools to use with Open Terminal. Use Valve `ENABLE_TEXT_EDITOR_TOOL`.
-
-v0.9.9
-- Fixed Tool Search Block reconstruction as well. Displays collapsible instead of status
-- Added Experimental support for the Advisor tool support (beta `advisor-tool-2026-03-01`). New valves:
-  `ENABLE_ADVISOR_TOOL`, `ADVISOR_MODEL` (default claude-opus-4-7),
-  `ADVISOR_MAX_USES` (0=unlimited), `ADVISOR_CACHING` (off/5m/1h ephemeral).
-
-v0.9.8
-- Complete overhaul of how message blocks are recreated for a new turn to align with
-    Anthropic cache restrictions.
-- Cache now should not break on new turns even when using RAG, image or PDF upload,
-    memory, tools, and similar flows.
-- Refactored tool / thinking output so grouped activity renders as one collapsible UI block.
-
-v0.9.7
-- Preserves thinking signatures across turns for better replay continuity and cache behavior.
-
-v0.9.6
-- Updated for Open WebUI 0.9.0+ async APIs.
-
-v0.9.5
-- Added Claude Opus 4.7 and the new xhigh effort level.
-
-v0.9.4
-- Added Cache Statistics to Token Count Message
-
-v0.9.3
-- Moved Compaction and Context Editing into UserValves.
-- Upgraded token display to Off / On / With Cache.
-
-v0.9.2
-- added compaction and client-side compaction trim: drops messages before the last compaction boundary before sending
-and added message trim optimization
-
-v0.9.1
-- return whole message at the end and switched from chat:completion to message:delta event to prevent empty messages
-
-v0.9
-- Fixed total_usage access bug when usage capability is not enabled on model
-- Removed Sonnet 4 and Opus/Sonnet 4.5 from 1 Mio context windows support
-- Fetch model capabilites like max_input_token now directly from the API
-- Added support for thinking.display: "omitted" (https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking#controlling-thinking-display)
-
-v0.8.12
-- Add API tool passthrough for external function calling
-- Added ANTHROPIC_BASE_URL valve to allow routing all API requests through a custom proxy URL
-- Fixed Tool Result output Grouping
-- Decluddered the if/else horror in event_type handling
-- Fixed OpenTerminal Tools
-
-v0.8.11
-- Added Caching time CACHE_TTL valve to choose between 5 minutes (default) and 1 hour
-- Fixed TTS in Call Mode
-- Added chat:completion done event in PHASE 7 for proper stream termination signalling
-- Fixed Tool Result and Thought Grouping for Openwebui 0.8.11
-- Fixed Programmatic Tool Call Issue
-
-v0.8.10
-- Pipe can now handle HTMLResponse Results from Tools (Rich UI with embedded iframes, HTML widgets, and file attachments)
-- Added Support for Openwebui Skills
-
-v0.8.9
-- Removed <details> tags from what's send to claude API to prevent hallucinations
-- Added Valves for Request and Tool call Timeouts
-- Increased MAX_TOOL_CALLS max limit for long agentic tasks
-- Added optional API Key set via UserValves (overrides header-level key)
-- Reintroduced the Ability for Claude to know how many tool calls are available until limit is hit
-- Removed 1 Mio Context Window Valve as it's now generally available
-
-v0.8.8
-- Fixed a Bug with interleaved thinking and tool calls where the API does not preserve the thinking blocks resulting in invalid requests
-- Tool Input and Code Execution Input is not correctly streamed in a collapsible container with spinner
-- Removed Status Update for Tool Calls and Code Execution as they are now streaming live with the new streaming strategy
-- Tool Call Errors get's correctly emitted now instead of silently ignored and causing unlimited spinning
-
-v0.8.7
-- Code execution blocks now use OpenWebUI native `<details type="code_interpreter">` format
-  - Spinner + "Analyzing…" / "Analyzed" transitions matching built-in code interpreter
-  - Duration tracking and display
-  - Output (stdout, stderr, tool call results) in HTML `output` attribute for CodeBlock rendering
-- Fixed live-streamed code blocks getting stuck on "Analyzing…" when new code_execution starts
-- Fixed empty "Analyzed" blocks by using accumulated code as fallback
-- Removed redundant status events for code execution ("Running code", "Code → Tool", "Code execution complete")
-- Fixed cache_control being placed on programmatic tool_use blocks with caller field
-- Removed _emit_code_execution_source calls (output now embedded in code_interpreter block)
-
-v0.8.6
-- Fixed Token Counting for new Analytics Tab
-- Properly formatted and grouped Thinking and Tool Result Blocks
-- Fixed Token Usage Status for 1 Mio Context Window
-
-v0.8.6
-- Fixed: Truncated streams (200 OK + no stop_reason after server tools) now auto-retry instead of silent empty response
-  - Detects when API returns thinking/server_tool blocks but no text and no stop_reason
-  - Auto-retries up to MAX_RETRIES times with clean state reset
-  - Shows user-visible status during retry and error message if all retries fail
-  - Root cause: Anthropic API overload (529) → SDK retry → 200 OK but truncated stream
-- Fixed: JSON.parse frontend error caused by pipe returning dict {} instead of empty string
-  - functions.py sent `data: {}` without [DONE] → frontend failed to parse as OpenAI chunk
-  - Now returns "" → proper finish_reason=stop + [DONE] SSE termination
-
-v0.8.6
-- Fixed: Truncated streams (200 OK + no stop_reason after server tools) now auto-retry instead of silent empty response
-  - Detects when API returns thinking/server_tool blocks but no text and no stop_reason
-  - Auto-retries up to MAX_RETRIES times with clean state reset
-  - Shows user-visible status during retry and error message if all retries fail
-  - Root cause: Anthropic API overload (529) → SDK retry → 200 OK but truncated stream
-- Fixed: JSON.parse frontend error caused by pipe returning dict {} instead of empty string
-  - functions.py sent `data: {}` without [DONE] → frontend failed to parse as OpenAI chunk
-  - Now returns "" → proper finish_reason=stop + [DONE] SSE termination
-
-v0.8.5
-- Refactored: Cache control logic consolidated into single `_apply_cache_control()` method
-  - All scattered cache_control placement removed from `_create_payload()` and tool loop
-  - Cache breakpoints now applied fresh right before every API call (initial + tool loop iterations)
-  - Bug fix: Tools now cached at all non-disabled levels (was missing at "messages" level)
-  - Tool loop: properly handles programmatic vs standard tool calling cache placement
-- Fixed: Effort level "max" now exclusively reserved for Opus 4.6 (was incorrectly allowed for Sonnet 4.6)
-- Fixed: pause_turn stop reason now auto-continues instead of ending with error message
-- Fixed: bash_code_execution_tool_result missing explicit error_code check — errors were silently ignored
-- Fixed: text_editor_code_execution_tool_result missing explicit error_code check
-- Fixed: code_execution_tool_result missing explicit error_code check
-- All server tool errors (web_search, web_fetch, code_execution, bash, text_editor) now emit user-visible error messages
-
-v0.8.4
-- Fixed: Streaming overloaded_error (HTTP 200 + SSE error) now retries instead of failing immediately (GH #19)
-- Fixed: Non-streaming OverloadedError (529) was falling through to generic APIStatusError handler instead of retrying
-- Added dedicated OverloadedError exception handler with proper retry logic
-- APIStatusError handler now checks e.body for overloaded_error type and retries if applicable
-
-v0.8.3
-- Text files created via text_editor (md, txt, csv, json, etc.) now display inline as markdown instead of code blocks
-- Code files created via text_editor use proper syntax highlighting based on file extension
-- Dynamic filtering valve description updated with speed vs quality tradeoff info (~60s vs ~7s)
-- Added concise API payload logging at DEBUG level (model, tools, system size, container, max_tokens, thinking mode)
-- Added tool result content size logging for tool call loop debugging
-
-v0.8.2
-- Streamlined code_execution UI for web search/fetch with dynamic filtering
-  - When dynamic filtering is active (without programmatic tool calling), code_execution UI is suppressed
-  - Only shows clean status: "🔍 Searching the web..." / "🌐 Fetching URL..."
-- Fixed max_uses not working with dynamic filtering web tools (20260209 versions don't support max_uses)
-- Added web_fetch status messages (start, URL being fetched, done/error)
-- Code execution output now emitted as source/citation event (visible in citation panel)
-- Consecutive code execution blocks are merged into one collapsible <details> block
-- Added web_fetch_tool_result handler with error detection
-
-v0.8.1
-- Added experimental Files API Support for uploading files to the Container. Feedback welcome!
-- Added a Valve to control wheter Opus/Sonnet 4.6 should use the new dynamic web_fetching and web_searching (At least I have issues with that)
-
-v0.8.0
-- Major streaming refactor: uses Anthropic SDK message accumulation instead of manual block tracking
-- Implemented Fine-grained tool streaming with eager_input_streaming
-- Tool search status now shows the actual search query
-- Added web_fetch Tool
-- Finally added Programmatic Tool Calling
-- Code execution blocks display code, tool calls, and output in a unified collapsible block
-- Updated web_search to use latest version with dynamic filtering support
-- Model capabilities updated for Sonnet 4.5/4.6 and Opus 4.6 dynamic filtering support
-- Added stop_reason debug logging for tool loop diagnostics
-- Citations appear AFTER the cited text again
-
-v0.7.1
-- Removed deprecated Models Sonnet 3.7 and Haiku 3
-
-v0.7.0
-- Added Sonnet 4.6 model support
-- Added Fast Mode support (speed: "fast" for Opus 4.6)
-- Added web_fetch tool (URL content retrieval)
-- Added memory tool integration with OpenWebUI memory system
-- Added programmatic tool calling (allowed_callers for code execution)
-- Fixed task model bug: _run_task_model_request() was called with extra argument
-
-v0.6.3
-- Added Opus 4.6
-- Added Support for effort: max
-- Added Support for Data residency
-- Added messages for stop_reason in case of refusal, stop_sequence or context window exceeded
-- Added ENABLE_INTERLEAVED_THINKING valve for enabling Thinking between Tool Calls
-- Homogenized Thinking and Tool Call/Results streaming to match build in OpenAI/Ollama system
-
-v0.6.2
-- Reordered Payload for better Caching
-
-v0.6.1
-- Full Skills Support: Users can add skills (eg. pptx, xlsx, docx, pdf) or custom skills already uploaded to the Anthropic Site
-- Skills are validated against the List Skills API endpoint with caching to avoid redundant API calls
-- Invalid skills are logged and users are notified via warning message
-
-v0.6
-- Thinking, Tool Results and Code Execution now streams correctly and is folded at the end of the stream
-- Tool Search Tool is now working correctly
-- Added a new Companion Filter that is overwriting internal web_search and code_interpreter in favor of the anthropic tools
-- Adding Files to the Conversation while using code interpreter now uploads the files to Anthropic Files API so they can be used by code execution VM
-- Fixed Code Execution Tool: New Anthropic bash_code_execution and text_editor_code_execution tools are used now
-- Added Buildin Openwebui Tools added in 0.7.0 - Be aware that this is introducing a lot of tokens. Best use with Tool Search
-- USE_PDF_NATIVE_UPLOAD is now True by default, PDF Files now are embedded in to the correct user message every conversation step, added invisible Markdown Markers for storing this data in assistant messages
-- Container ID persists across multi-turn conversations for code execution state continuity
-- RAG is now working correctly in conjunction with Native PDF File upload, removing all sources from the RAG message which were already uploaded as native documents
-
-v0.5.12
-- Thinking is now streamed in the UI and folded when the thought process has ended
-
-v0.5.11
-- Added Compatibility to Build-in Tools from OpenWebUI 0.7.x
-
-v0.5.10
-- Performance: Pre-compiled regex patterns at module level (5-10x faster pattern matching)
-- Performance: Added debug logging guards to prevent expensive JSON serialization
-- Documentation: Added comprehensive docstring and section comments to pipe() method
-
-v0.5.9
-- PDF with 'Use Full Document Content' mode will then be uploaded as base64 documents instead of RAG text extraction, use UserValve USE_PDF_NATIVE_UPLOAD to Toggle
-
-v0.5.8
-- Fixed UnboundLocalError for 'total_usage' variable when opening new chats
-- Added code execution to default TOOL_SEARCH_EXCLUDE_TOOLS list
-
-v0.5.7
-- Added Valve to exclude specific tools from deferred loading when tool search is enabled (web_search excluded by default)
-- Web Search Toogle Filter overrides WEB_SEARCH Valve
-- Fixed a Bug in Tool Search return
-
-v0.5.6
-- Added Context Editing feature (clear_tool_uses, clear_thinking) with configurable strategies
-- Added Tool Search feature (BM25/Regex) with deferred tool loading
-- Status events for context clearing with token counts
-
-v0.5.5
-- Fixed effort parameter support by upgrading Anthropic SDK from 0.60.0 to 0.75.0
-
-v0.5.4
-- Fixed Message Caching Problems when using RAG or Memories
-
-v0.5.3
-- Added Support for Anthropic Effort Levels (low, medium, high)
-- Added Support for Opus 4.5
-- Use correct logger for logging
-- Removed DEBUG Valve
-- Introduced UserValves for setting user-specific options like thinking, effort, web search limits and location
-
-v0.5.2
-- Fixed usage statistics accumulation for multi-step tool calls
-- Correctly sums input and output tokens across all turns in a request
-
-v0.5.1
-- Fixed caching issue in tool execution loops where cache_control marker could be lost
-- Optimized caching for multi-step tool calls by moving cache breakpoint to the latest tool result
-
-v0.5.0
-- **CRITICAL FIX**: Eliminated cross-talk between concurrent users/requests
-- Removed shared instance state (self.eventemitter, self.request_id) that caused response mixing
-
-v0.4.9
-- Performance optimization: Moved local imports to top level
-- Fixed fallback logic for model fetching when API fails
-
-v0.4.8
-- Added configurable MAX_TOOL_CALLS valve (default: 15, range: 1-50)
-- Moved tool execution status events to content_block_start for immediate feedback (prevents stalling on long parameters)
-- Added proactive warning to Claude when only 1 tool call remains before limit
-- System message injected before final call to encourage text response instead of more tool calls
-- Added user notifications when approaching limit (≤3 calls) and when limit is reached
-- Improved event loop yielding with asyncio.sleep() for reliable status event delivery on heavy tool calls loads
-
-v0.4.7
-- Fixed potential data leakage between concurrent users
-- Code cleanup and stability improvements
-
-v0.4.6
-- Tool results now display input parameters at the top
-- Shows "Input:" section with tool parameters before "Output:" section
-- Improves visibility of what parameters were passed to each tool call
-
-v0.4.5
-- Added status events for local tool execution (AIT-102)
-- Tools now show "Executing tool: {tool_name}" when they start
-- Tools show "Waiting for X tool(s) to complete..." during execution
-- Tools show "Tool execution complete" when finished
-- Improves UX for long-running tools - users now see activity instead of apparent hanging
-
-v0.4.4
-- Tool calls now execute in parallel and start immediately when detected
-- Server tools (e.g., web_search) are no longer misidentified as local tools
-- Web search now emits correct status events during execution
-- Fixed final message chunk not being flushed in some streaming scenarios
-
-v0.4.3
-- Fixed compatibility with OpenWebUI "Chat with Notes" feature
-- Added filtering for empty text content blocks to prevent API errors
-- Messages with empty content arrays are now skipped (fixes empty assistant messages from Notes chat)
-
-v0.4.2
-- Fixed NoneType error in OpenWebUI Channels when models are mentioned (@model)
-- Added safe event emitter wrapper to handle missing __event_emitter__ in channel contexts
-- All status/notification/citation events now gracefully handle None event emitter
-
-v0.4.1
-- Added a Valve to Show Token Count in the final status message
-- Auto-enable native function calling when tools are present (prevents OpenWebUI's function_calling task system)
-
-v0.4.0
-- Added Task Support (sorry, I forgot). Follow Ups, Titles and Tags are now generated.
-- Fix "invalid_request_error ", when a response contains both, a server tool and a local tool use (eg. web search and a local tool).
-
-v0.3.9
-- Added fine grained cache control valve with 4 levels: disabled, tools only, tools + system prompt, tools + system prompt + user messages
-
-v0.3.8
-- Removed MAX_OUTPUT_TOKENS valve - now always respects requested max_tokens up to model limit
-- Simplified token calculation logic
-- Reworked the caching with active Openwebui Memory System, Memories are now extracted from system prompt and injected into user messages as context blocks
-- Refactored Model Info structure for maintainability
-- Pipe is now retrying request on overloaded, rate_limit or transient errors up to MAX_RETRIES valve
-- Status indicator is now shown while waiting for the first response (first response took very long when using eg. web_search tool)
-- Removed unused aiohttp and random imports
-
-v0.3.7
-- Fixed Extended Thinking compatibility with Tool Use (API now requires thinking blocks before tool_use blocks)
-- Added automatic placeholder thinking blocks when needed for API compliance
-- Added validation for all assistant messages with tool_use when Extended Thinking is enabled
-
-v0.3.6
-- Added 4.5 Haiku Model
-- Restructured Model Capabilities for more Maintainability
-
-v0.3.5
-- Fixed a bug where the last chunk was not sent in some cases
-- Improved error handling and logging
-- Added Correct Citation Handling for Web Search
-
-v0.3.4
-- Added Claude 4.5 Sonnet
-- Small Bugfix with final_message
-- Added OpenWebUI Token Usage Compatibility
-- Added a Check for Duplicate Tool Names and private tool name (starting with "_") to avoid API errors
-
-v0.3.3
-- Fixed Tool Call error
-
-v0.3.2
-- Fixed type and added changelog
-
-v0.3.1
-- Fixed a bug where message would disappear after Error occurs
-
-v0.3
-- Added Vision support (__files__ handling & image processing improvements)
-- Added Extended Thinking filter & metadata override with clamped budget logic (default 10K, safe min/max enforcement)
-- Added Web Search Enforcement toggle (one‑shot metadata flag forces web_search tool_choice)
-- Added Anthropic Code Execution Tool with toggle filter & beta header
-- Enabled fine‑grained tool streaming beta by default
-- Added metadata & valve controlled injection of code execution tool spec
-- Improved cache control: auto‑disables cache when dynamic Memory / RAG blocks detected; ephemeral caching for stable blocks
-- Refined tool_choice precedence (enforced web search before auto)
-- Added 1M context optional beta header for supported Sonnet 4 models
-- Improved malformed tool_use JSON salvage (_finalize_tool_buffer) & robust final chunk flush
-- Misc debug output refinements & system prompt cleanup
-
-v0.2
-- Fixed caching by moving Memories to Messages instead of system prompt
-- You can show Cache Usage Statistics with a Valve as Source Event
-- Fixed error where last chunk is not shown in frontend
-- Fixed defective event_emitters and removed unneeded method
-- Fixed unnecessary requirements
-- Implemented Web Search Valves and error handling
-- Robust error handling
-- Added Cache_Control for System_Prompt, Tools, and Message Array
-- Refactored for readability and support for new models
 """
 
 import re
@@ -588,16 +83,10 @@ from anthropic import (
     InternalServerError,
     PermissionDeniedError,
     NotFoundError,
+    OverloadedError,
     UnprocessableEntityError,
 )
 
-try:
-    from anthropic import OverloadedError
-except ImportError:
-    # anthropic SDK < 0.45 doesn't have OverloadedError
-    # Create a placeholder that will never match (handled via APIStatusError instead)
-    class OverloadedError(Exception):
-        pass
 from typing import Literal
 from fastapi import Request
 
@@ -642,13 +131,6 @@ MEMORY_CONTEXT_APPENDIX_HEADER = (
     "but context from a memory system to help answer the user's questions:\n\n"
 )
 
-# Patterns for RAG template cleanup when all sources are native PDFs
-PATTERN_RAG_TEMPLATE_WITH_CONTEXT = re.compile(
-    r"###\s*Task:.*?<context>.*?</context>", flags=re.DOTALL | re.MULTILINE
-)
-PATTERN_RAG_TEMPLATE_FALLBACK = re.compile(
-    r"###\s*Task:.*?$", flags=re.DOTALL | re.MULTILINE
-)
 PATTERN_EMPTY_CONTEXT = re.compile(r"<context>\s*</context>", flags=re.DOTALL)
 
 # Pattern to find remaining source tags (for checking if all were removed)
@@ -656,16 +138,6 @@ PATTERN_SOURCE_TAGS = re.compile(r"<source[^>]*>.*?</source>", flags=re.DOTALL)
 
 # RAG message detection: matches "### Task:...<context>...</context>" blocks
 PATTERN_RAG_MESSAGE = re.compile(r"### Task:.*?<context>.*?</context>", re.DOTALL)
-
-# Individual <source> tag with name attribute extraction
-PATTERN_SOURCE_TAG = re.compile(
-    r'<source[^>]*name="([^"]+)"[^>]*>.*?</source>\s*', re.DOTALL
-)
-
-# Empty <attached_files> blocks after file tag removal
-PATTERN_EMPTY_ATTACHED = re.compile(
-    r"<attached_files>\s*</attached_files>\s*", re.DOTALL
-)
 
 # Pattern to strip OpenWebUI <details type="tool_calls"> blocks from conversation history.
 # These are UI-rendering artifacts that cause Claude 4.6 models to pattern-match and
@@ -800,7 +272,8 @@ OPENWEBUI_BUILTIN_TOOL_NAMES = [
     "update_automation", "update_calendar_event", "update_memory",
     "update_task", "view_channel_message", "view_channel_thread",
     "view_chat", "view_file", "view_knowledge_file", "view_note",
-    "view_skill", "write_note",
+    "view_skill", "read_skill_file", "create_skill", "update_skill_files",
+    "write_note",
     # Open Terminal / kb tools
     "kb_exec",
     "display_file", "get_process_status", "glob_search", "grep_search",
@@ -812,6 +285,12 @@ OPENWEBUI_BUILTIN_TOOL_NAMES = [
 DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
     ANTHROPIC_SERVER_TOOL_NAMES + OPENWEBUI_BUILTIN_TOOL_NAMES
 )
+
+# OpenWebUI >= 0.12 Tool Search (open_webui/utils/tool_search.py): its
+# search tool and the `<available_tools>` manifest it appends to the system
+# prompt. Replaced by Claude's native tool search, see request/tools.py.
+OWUI_SEARCH_TOOL_NAME = "search_tools"
+OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
 
 
 def normalize_tool_name_list(value: Any) -> set[str]:
@@ -913,16 +392,6 @@ PATTERN_EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
 # IMPORTS
 # =============================================================================
 
-# Import OpenWebUI Models for auto-enabling native function calling
-try:
-    from open_webui.models.models import Models, ModelForm
-
-    MODELS_AVAILABLE = True
-except ImportError:
-    Models = None
-    ModelForm = None
-    MODELS_AVAILABLE = False
-
 # =============================================================================
 # SECRET VALVE ENCRYPTION
 # =============================================================================
@@ -946,13 +415,7 @@ except ImportError:
     InvalidToken = Exception
     VALVE_ENCRYPTION_AVAILABLE = False
 
-try:
-    from pydantic_core import core_schema
-
-    PYDANTIC_CORE_AVAILABLE = True
-except ImportError:
-    core_schema = None
-    PYDANTIC_CORE_AVAILABLE = False
+from pydantic_core import core_schema
 
 ENCRYPTED_VALVE_PREFIX = "encrypted:"
 
@@ -960,6 +423,27 @@ try:
     from open_webui.env import VERSION as OPENWEBUI_VERSION
 except Exception:
     OPENWEBUI_VERSION = "unknown"
+
+
+def _owui_version_below(target: tuple) -> bool:
+    """True when the running OpenWebUI is older than `target`; False if unknown."""
+    try:
+        parts = tuple(int(p) for p in str(OPENWEBUI_VERSION).split("-")[0].split(".")[:3])
+    except ValueError:
+        return False
+    return parts < target
+
+
+# OpenWebUI < 0.10 defaults function_calling to the prompt-based mode, which
+# bypasses the pipe's own tool loop. Since 0.10 an unset value means native.
+try:
+    from open_webui.models.models import Models, ModelForm
+
+    MODELS_AVAILABLE = True
+except ImportError:
+    Models = None
+    ModelForm = None
+    MODELS_AVAILABLE = False
 
 # Whether OpenWebUI encrypts valves at rest itself. Checked instead of comparing
 # version numbers: the constant only exists from 0.10.0, and it reflects the
@@ -1046,31 +530,22 @@ def decrypt_valve_secret(value: Any) -> str:
         ) from e
 
 
-if PYDANTIC_CORE_AVAILABLE:
+class EncryptedStr(str):
+    """Valve field type that keeps its value encrypted at rest.
 
-    class EncryptedStr(str):
-        """Valve field type that keeps its value encrypted at rest.
+    OpenWebUI persists `Valves(**form_data).model_dump()`, so the value the
+    validator returns is what reaches the database.
+    """
 
-        OpenWebUI persists `Valves(**form_data).model_dump()`, so the value the
-        validator returns is what reaches the database.
-        """
+    @classmethod
+    def _validate(cls, value: Any) -> "EncryptedStr":
+        return cls(encrypt_valve_secret(str(value or "")))
 
-        @classmethod
-        def _validate(cls, value: Any) -> "EncryptedStr":
-            return cls(encrypt_valve_secret(str(value or "")))
-
-        @classmethod
-        def __get_pydantic_core_schema__(cls, source_type, handler):
-            return core_schema.no_info_after_validator_function(
-                cls._validate, core_schema.str_schema()
-            )
-
-        def get_secret(self) -> str:
-            """Plaintext value. Raises ValueError if the secret key changed."""
-            return decrypt_valve_secret(self)
-
-else:  # pragma: no cover - pydantic v2 always ships pydantic_core
-    EncryptedStr = str
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        return core_schema.no_info_after_validator_function(
+            cls._validate, core_schema.str_schema()
+        )
 
 
 # Import OpenWebUI builtin tools helper
@@ -1265,6 +740,9 @@ class PipeRequestContext:
 
 # BEGIN GENERATED SECTION: anthropic_pipe.response.internal_tool_results
 # END GENERATED SECTION: anthropic_pipe.response.internal_tool_results
+
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
+# END GENERATED SECTION: anthropic_pipe.shared.pricing
 
 
 
@@ -1484,17 +962,12 @@ class Pipe:
     # Cached model capabilities from API (populated by get_anthropic_models)
     _api_capabilities_cache: Dict[str, dict] = {}
     _api_capabilities_cache_ts: float = 0.0
-    _API_CACHE_TTL = 86400  # 24 hours; overridden by MODEL_CACHE_TTL_MINUTES
     # Fingerprint of the connection settings the cached model list was fetched
     # with. A changed key, base URL, workspace or allow-list must invalidate the
     # cache immediately -- otherwise pointing the pipe at a different endpoint
     # keeps serving the previous endpoint's models until the TTL expires.
     _api_capabilities_cache_sig: str = ""
 
-    REQUEST_TIMEOUT = (
-        300  # Default; overridden by valve REQUEST_TIMEOUT
-    )
-    THINKING_BUDGET_TOKENS = 4096  # Default thinking budget tokens (max 16K)
     TOOL_CALL_TIMEOUT = 120  # Default; overridden by valve TOOL_CALL_TIMEOUT
 
     # =========================================================================
@@ -1683,6 +1156,18 @@ class Pipe:
             "Changing the API key, base URL, workspace or ENABLED_MODELS always "
             "refreshes immediately, regardless of this setting.",
         )
+        MODEL_PRICING_OVERRIDES: str = Field(
+            default="",
+            description="JSON patch for the built-in price table used by the SHOW_COST estimate, in USD per "
+            "million tokens, keyed by model id. Keys: input, output, cache_write_5m, cache_write_1h, "
+            "cache_read, fast_input, fast_output; omitted cache rates derive from `input` at Anthropic's "
+            "standard multipliers (1.25x / 2x / 0.1x). Prompt-length pricing (Haiku 5.5): "
+            "long_context_threshold plus long_input / long_output (long_cache_* optional), applied to every "
+            "API call whose prompt exceeds the threshold. Example: "
+            '{"claude-sonnet-5": {"input": 3, "output": 15}, "my-proxy-model": {"input": 1, "output": 5}}. '
+            "Anthropic does not publish prices through the API, so this is how to track price changes "
+            "or a negotiated rate without waiting for a pipe release.",
+        )
 
     class UserValves(BaseModel):
         ANTHROPIC_API_KEY: EncryptedStr = Field(
@@ -1751,6 +1236,15 @@ class Pipe:
         SHOW_TOKEN_COUNT: Literal["Off", "On", "With Cache"] = Field(
             default="Off",
             description="Show context window progress after each response. 'With Cache' also shows cache read/write tokens.",
+        )
+        SHOW_COST: bool = Field(
+            default=True,
+            description="Report the estimated USD cost of the turn as `cost_usd` plus a per-component "
+            "`cost_breakdown_usd` (input, output, cache writes/reads, web search) in the message usage "
+            "(visible in the message info tooltip and persisted for analytics) and, when SHOW_TOKEN_COUNT "
+            "is on, in the status line. Based on Anthropic list prices for the model, including cache "
+            "writes/reads, fast mode, US data residency and web searches; negotiated or third-party-proxy "
+            "rates are not known to the pipe unless the admin sets MODEL_PRICING_OVERRIDES.",
         )
         WEB_SEARCH_MAX_USES: int = Field(
             default=5,
@@ -1849,40 +1343,6 @@ class Pipe:
         COMPACTION_INSTRUCTIONS: str = Field(
             default="",
             description="Custom summarization instructions for compaction. Replaces the default prompt entirely when set.",
-        )
-        CONTEXT_EDITING_STRATEGY: Literal[
-            "none", "clear_tool_results", "clear_thinking", "clear_both"
-        ] = Field(
-            default="none",
-            description="Context editing strategy: none (disabled), clear_tool_results, clear_thinking, or clear_both.",
-        )
-        CONTEXT_EDITING_THINKING_KEEP: int = Field(
-            default=0,
-            ge=0,
-            le=9999,
-            description="How many recent assistant turns with thinking blocks to preserve. 0 = keep all (maximizes cache hits — recommended). N>0 = sliding window; Anthropic server-side clears oldest thinking each turn once exceeded, which INVALIDATES the prompt cache prefix on every subsequent request. Only use N>0 if context-window pressure outweighs cache savings.",
-        )
-        CONTEXT_EDITING_TOOL_TRIGGER: int = Field(
-            default=50000,
-            ge=1000,
-            le=500000,
-            description="Token count threshold that triggers tool result clearing.",
-        )
-        CONTEXT_EDITING_TOOL_KEEP: int = Field(
-            default=5,
-            ge=0,
-            le=100,
-            description="Number of recent tool results to preserve when clearing.",
-        )
-        CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST: int = Field(
-            default=10000,
-            ge=0,
-            le=100000,
-            description="Minimum tokens to clear when triggered (helps with cache optimization).",
-        )
-        CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT: bool = Field(
-            default=False,
-            description="Also clear tool input parameters when clearing tool results.",
         )
         TOOL_RESULT_MAX_TOKENS: int = Field(
             default=50000,

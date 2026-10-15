@@ -735,6 +735,23 @@ class PipeRequestMessagesMethods:
                 if pending_results and any(
                     isinstance(b, dict) and b.get("type") == "text" for b in blocks
                 ):
+                    # A server tool the model called right after the client
+                    # tool_use belongs to that same assistant message; only its
+                    # result opens the next one (see server_tool.py, after_client).
+                    after_client_ids = {
+                        html.unescape(a.get("tool-use-id", ""))
+                        for a in (
+                            dict(PATTERN_DATA_ATTR.findall(m.group(1)))
+                            for m in PATTERN_SERVER_TOOL_USE_BLOCK.finditer(data)
+                        )
+                        if a.get("after-client") == "true"
+                    }
+                    while (
+                        blocks
+                        and blocks[0].get("type") == "server_tool_use"
+                        and blocks[0].get("id") in after_client_ids
+                    ):
+                        current_assistant.append(blocks.pop(0))
                     flush()
                 current_assistant.extend(blocks)
             else:  # tool_call
@@ -748,7 +765,7 @@ class PipeRequestMessagesMethods:
                     )
                     continue
                 tc_args_raw = html.unescape(attrs.get("arguments", "") or "")
-                tc_result_raw = html.unescape(attrs.get("result", "") or "")
+                tc_result_raw = self._canonical_tool_result_text(html.unescape(attrs.get("result", "") or ""))
                 tc_done = (attrs.get("done", "true") or "true") == "true"
                 tc_error = (attrs.get("error", "false") or "false") == "true"
                 try:
@@ -797,6 +814,24 @@ class PipeRequestMessagesMethods:
 
         flush()
         return messages
+
+    @staticmethod
+    def _canonical_tool_result_text(text: str) -> str:
+        """The one text form a tool result has, live in the tool loop and on replay.
+
+        The `<details result="...">` attribute stores JSON compacted and plain
+        text JSON-quoted (see `_format_tool_result_block`). If the live loop sent
+        the tool's raw string instead, every later turn would replay different
+        bytes and lose the prompt cache from the first tool result on. Valid JSON
+        is compacted, a JSON string literal is unwrapped, anything else is kept.
+        """
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if isinstance(parsed, str):
+            return parsed
+        return json.dumps(parsed, ensure_ascii=False)
 
     def _convert_tool_result_content(self, result_str, user=None):
         """

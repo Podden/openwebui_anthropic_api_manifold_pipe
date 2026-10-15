@@ -76,11 +76,17 @@ class PipeCacheControlMethods:
         readable; the rest is alphabetical. Key ORDER is all that changes, never
         keys or values, so the request itself is unaffected -- JSON objects are
         order-insensitive to the API's parser.
+
+        Except a tool call's ``input``: the model generated that JSON, and the
+        API renders it back into the prompt in the order it receives. The tool
+        loop appends the live order without passing through here, so sorting it
+        on replay made the next turn's prefix differ from the loop's for every
+        call with two or more arguments (measured: ``messages_changed``).
         """
         def _walk(n):
             if isinstance(n, dict):
                 items = sorted(n.items(), key=lambda kv: (kv[0] != "type", kv[0]))
-                return {k: _walk(v) for k, v in items}
+                return {k: (v if k == "input" else _walk(v)) for k, v in items}
             if isinstance(n, list):
                 return [_walk(v) for v in n]
             return n
@@ -151,6 +157,10 @@ class PipeCacheControlMethods:
                         i for i, t in enumerate(tools)
                         if isinstance(t, dict) and "cache_control" in t
                     ],
+                    "deferred": [
+                        t.get("name") for t in tools
+                        if isinstance(t, dict) and t.get("defer_loading")
+                    ],
                 }
             elif k == "messages":
                 stripped["messages"] = _walk(v)
@@ -205,7 +215,9 @@ class PipeCacheControlMethods:
                 import hashlib
                 stripped = _strip_cache_control(m)
                 try:
-                    canon_ins = json.dumps(stripped, sort_keys=False, separators=(",", ":"), ensure_ascii=False,
+                    # Through the same canonicaliser as the wire payload: the API
+                    # ignores block key order (measured), only tool `input` order counts.
+                    canon_ins = json.dumps(self._canonicalize_block(stripped), sort_keys=False, separators=(",", ":"), ensure_ascii=False,
                                            default=lambda o: repr(o))
                 except Exception:
                     canon_ins = repr(stripped)

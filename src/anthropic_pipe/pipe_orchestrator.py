@@ -139,39 +139,8 @@ class PipeOrchestratorMethods:
                         if __user__
                         else False
                     )
-                    # Resolve skill IDs for view_skill builtin tool
-                    skill_ids = []
-                    try:
-                        openwebui_model_id = __metadata__.get("model_id") or body.get("model", "")
-                        if openwebui_model_id and MODELS_AVAILABLE:
-                            owui_model = await Models.get_model_by_id(openwebui_model_id)
-                            if owui_model:
-                                # ModelModel has .meta (ModelMeta pydantic model), not .info
-                                meta = owui_model.meta
-                                if meta:
-                                    meta_dict = meta.model_dump() if hasattr(meta, "model_dump") else (meta if isinstance(meta, dict) else {})
-                                    model_skill_ids = set(meta_dict.get("skillIds", []))
-                                else:
-                                    model_skill_ids = set()
-                                logger.debug(f"Model {openwebui_model_id} skill IDs: {model_skill_ids}")
-                                if model_skill_ids:
-                                    from open_webui.models.skills import Skills as SkillsModel
-
-                                    user_id = __user__.get("id", "") if __user__ else ""
-                                    accessible_skills = await SkillsModel.get_skills_by_user_id(user_id, "read")
-                                    accessible = {s.id for s in accessible_skills}
-                                    logger.debug(f"Accessible skills for user: {accessible}")
-                                    skill_ids = []
-                                    for sid in model_skill_ids:
-                                        if sid not in accessible:
-                                            continue
-                                        s = await SkillsModel.get_skill_by_id(sid)
-                                        if s and s.is_active:
-                                            skill_ids.append(sid)
-                                    logger.debug(f"Resolved skill_ids: {skill_ids}")
-                    except Exception as e:
-                        logger.debug(f"Could not resolve skill IDs: {e}")
-
+                    # Skill tools come from OpenWebUI in __tools__ when the
+                    # model's Builtin Tools > Skills switch allows them.
                     builtin_tools = get_builtin_tools(
                         __request__,
                         {
@@ -183,10 +152,9 @@ class PipeOrchestratorMethods:
                             "__message_id__": (
                                 __metadata__.get("message_id") if __metadata__ else None
                             ),
-                            "__skill_ids__": skill_ids,
                         },
                         features={"memory": memory_enabled},
-                        model={},
+                        model={"info": {"meta": {"builtinTools": {"skills": False}}}},
                     )
                     if inspect.isawaitable(builtin_tools):
                         builtin_tools = await builtin_tools
@@ -210,52 +178,45 @@ class PipeOrchestratorMethods:
                         f"After metadata merge, builtin_tools: {list(builtin_tools.keys())}"
                     )
 
-            # STEP 3: Auto-enable native function calling if tools are present
-            # This prevents OpenWebUI's function_calling task system from being triggered
-            if __tools__ and MODELS_AVAILABLE:
+            # STEP 3: OpenWebUI < 0.10 only — an unset function_calling meant the
+            # prompt-based mode there, which bypasses this pipe's tool loop. From
+            # 0.10 on unset means native, and an explicit "legacy" is the admin's call.
+            if __tools__ and MODELS_AVAILABLE and _owui_version_below((0, 10, 0)):
+                openwebui_model_id = (__metadata__ or {}).get("model_id") or body.get("model")
                 try:
-                    # Get the OpenWebUI model ID from metadata
-                    openwebui_model_id = (
-                        __metadata__.get("model_id") if __metadata__ else None
-                    )
-                    if not openwebui_model_id and body and "model" in body:
-                        openwebui_model_id = body["model"]
-
-                    if openwebui_model_id:
-                        model = await Models.get_model_by_id(openwebui_model_id)
-                        if model:
-                            params = dict(model.params or {})
-                            if params.get("function_calling") != "native":
-                                logger.debug(
-                                    f"Auto-enabling native function calling for model: {openwebui_model_id}"
-                                )
-
-                                # Notify user
-                                await emit_event_local(
-                                    {
-                                        "type": "notification",
-                                        "data": {
-                                            "type": "info",
-                                            "content": f"Enabling native function calling for model: {openwebui_model_id}. Please re-run your query.",
-                                        },
-                                    }
-                                )
-
-                                params["function_calling"] = "native"
-                                form_data = model.model_dump()
-                                form_data["params"] = params
-                                await Models.update_model_by_id(
-                                    openwebui_model_id, ModelForm(**form_data)
-                                )
+                    model = Models.get_model_by_id(openwebui_model_id) if openwebui_model_id else None
+                    if inspect.isawaitable(model):  # sync before OpenWebUI 0.9
+                        model = await model
+                    params = dict(model.params or {}) if model else {}
+                    if model and params.get("function_calling") != "native":
+                        params["function_calling"] = "native"
+                        form_data = model.model_dump()
+                        form_data["params"] = params
+                        updated = Models.update_model_by_id(openwebui_model_id, ModelForm(**form_data))
+                        if inspect.isawaitable(updated):
+                            await updated
+                        await emit_event_local({
+                            "type": "notification",
+                            "data": {
+                                "type": "info",
+                                "content": f"Enabling native function calling for model: {openwebui_model_id}. Please re-run your query.",
+                            },
+                        })
                 except Exception as e:
-                    logger.warning(
-                        f"Could not auto-enable native function calling: {e}"
-                    )
+                    logger.warning(f"Could not auto-enable native function calling: {e}")
 
             # Tell middleware to skip reasoning tag detection — the pipe renders
             # its own <details type="reasoning"> blocks which must not be re-parsed.
             if __metadata__ is not None:
                 __metadata__.setdefault("params", {})["reasoning_tags"] = False
+
+            # OpenWebUI Tool Search manifest: its tools go out with native
+            # `defer_loading` instead (request/tools.py), so the manifest's
+            # "call search_tools" instruction would point at a missing tool.
+            if __metadata__ and __metadata__.get("deferred_tools"):
+                for msg in body.get("messages", []):
+                    if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+                        msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])
 
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
@@ -294,7 +255,6 @@ class PipeOrchestratorMethods:
             )
 
             # Stream configuration from valves
-            token_buffer_size = getattr(self.valves, "TOKEN_BUFFER_SIZE", 1)
             max_function_calls = self.valves.MAX_TOOL_CALLS
 
             # Thinking state lives on request_ctx.state.thinking, owned by
@@ -356,6 +316,7 @@ class PipeOrchestratorMethods:
                 tool_loop_iteration += 1
                 # Reset per-iteration state
                 stream_output_tokens = 0
+                stream_web_search_requests = 0
 
                 try:
                     stream_event_counts = {}  # Track event types for diagnostics#
@@ -372,21 +333,22 @@ class PipeOrchestratorMethods:
                     # Dump the full (stripped) outgoing payload so we can audit
                     # cache_control placement, tool list, message order and byte
                     # drift across turns without logging megabytes of base64.
-                    try:
-                        logger.debug(
-                            "[PAYLOAD run=%s] iter=%d retry=%d %s",
-                            run_id,
-                            tool_loop_iteration,
-                            retry_attempts,
-                            json.dumps(
-                                self._strip_payload(payload_for_stream),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                        )
-                    except Exception as _pl_err:
-                        logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
+                    if logger.isEnabledFor(logging.DEBUG):
+                        try:
+                            logger.debug(
+                                "[PAYLOAD run=%s] iter=%d retry=%d %s",
+                                run_id,
+                                tool_loop_iteration,
+                                retry_attempts,
+                                json.dumps(
+                                    self._strip_payload(payload_for_stream),
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                    default=str,
+                                ),
+                            )
+                        except Exception as _pl_err:
+                            logger.debug(f"[PAYLOAD] strip/log failed: {_pl_err}")
                     # Fast mode has its own rate limit; fail a fast request
                     # immediately instead of letting the SDK back off, so the
                     # 429 handler below can fall back to standard speed.
@@ -503,6 +465,21 @@ class PipeOrchestratorMethods:
                                             total_usage.get("input_tokens", 0)
                                             + total_usage.get("output_tokens", 0)
                                         )
+                                        # Web searches are billed per request
+                                        # ($10/1k). Like output_tokens, the
+                                        # count is cumulative within one API
+                                        # call, so accumulate the delta.
+                                        server_tool_use = getattr(usage, "server_tool_use", None)
+                                        current_searches = (
+                                            getattr(server_tool_use, "web_search_requests", 0) or 0
+                                        ) if server_tool_use else 0
+                                        total_usage["_web_search_requests"] = (
+                                            total_usage.get("_web_search_requests", 0)
+                                            + (current_searches - stream_web_search_requests)
+                                        )
+                                        stream_web_search_requests = current_searches
+                                        ModelPricing.record_billing_modifiers(usage, total_usage)
+                                        ModelPricing.update_call_output(total_usage, current_output_tokens)
                                 delta = getattr(event, "delta", None)
                                 code_execution_container_id = getattr(delta, "container", None)
                                 if code_execution_container_id:
@@ -627,6 +604,8 @@ class PipeOrchestratorMethods:
                                                         result_str = json.dumps(tool_result, ensure_ascii=False)
                                                     except (TypeError, ValueError):
                                                         result_str = str(tool_result)
+                                                # Same bytes the next turn replays from the stored block.
+                                                result_str = self._canonical_tool_result_text(result_str)
                                                 # Convert any embedded data:image;base64 URI (e.g. a
                                                 # read_file tool returning a PNG) into a real Anthropic
                                                 # image block instead of raw base64 TEXT, and apply the
@@ -655,7 +634,7 @@ class PipeOrchestratorMethods:
                                                     # tool-call embeds inline at the tool call indicator.
                                                     completed = self._format_tool_result_block(
                                                         tool_use_id, tool_name, tool_input,
-                                                        str(tool_result), is_error=is_error, done=True,
+                                                        result_str, is_error=is_error, done=True,
                                                         files=tool_result_files,
                                                         embeds=tool_result_embeds,
                                                     )
@@ -807,7 +786,7 @@ class PipeOrchestratorMethods:
                                         + f"\n\nAn error occurred: {error_details}"
                                     )
 
-                            if text_state.chunk_count > token_buffer_size:
+                            if text_state.chunk_count > 1:
                                 if text_state.chunk:
                                     await emit_message_delta(text_state.chunk)
                                     text_state.chunk = ""
@@ -1249,6 +1228,17 @@ class PipeOrchestratorMethods:
         # ---------------------------------------------------------
 
         final_status = "✅ Response Complete"
+        # ============ Cost Estimate ============
+        # Stored as public keys so they travel with the usage dict: OpenWebUI
+        # renders every key of `message.usage` in the message info tooltip and
+        # persists the dict for the analytics page. Absent (not 0) for models
+        # with no known rate card.
+        if include_usage and total_usage and getattr(__user__["valves"], "SHOW_COST", True):
+            cost_breakdown = self._model_pricing().breakdown(body["model"].split("/")[-1], total_usage)
+            if cost_breakdown is not None:
+                total_usage["cost_usd"] = round(sum(cost_breakdown.values()), 6)
+                total_usage["cost_breakdown_usd"] = cost_breakdown
+
         # ============ Token Count Display ============
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
         if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
@@ -1302,6 +1292,11 @@ class PipeOrchestratorMethods:
                 # me": the share of billed input served from cache at 0.1x.
                 if billed_input:
                     final_status += f" | ⚡ {cache_read / billed_input * 100:.0f}% cached"
+
+            # Estimated list-price cost of the whole turn (all calls). Silently
+            # absent for models with no known rate card rather than showing $0.
+            if "cost_usd" in total_usage:
+                final_status += f" | 💵 ≈{ModelPricing.format_usd(total_usage['cost_usd'])}"
 
         # Consolidate: emit a final replace with the complete message so OpenWebUI
         # has the authoritative content (replaces any partial delta/replace state).

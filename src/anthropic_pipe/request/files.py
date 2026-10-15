@@ -351,7 +351,6 @@ class PipeRequestFilesMethods:
     ) -> str:
         """Download file from Anthropic Files API, save to OpenWebUI, return markdown link."""
         try:
-            from anthropic import AsyncAnthropic
             import hashlib
             import io
             import uuid
@@ -422,31 +421,18 @@ class PipeRequestFilesMethods:
         """
         blocks_by_user_msg: Dict[int, List[Dict[str, Any]]] = {}
         processed_filenames: List[str] = []
-        status_cls = globals().get("StatusEmitter")
-        status = status_cls(__event_emitter__) if status_cls else None
+        status = StatusEmitter(__event_emitter__)
 
         async def emit_status(description: str, *, done: bool = False) -> None:
-            """Emit a status update via StatusEmitter if available, else fall back to a raw status event."""
-            if status:
-                if done:
-                    await status.complete(description)
-                else:
-                    await status.activity(description)
-                return
-            await self.emit_event(
-                {"type": "status", "data": {"description": description, "done": done}},
-                __event_emitter__,
-            )
+            """Emit a status update via StatusEmitter."""
+            if done:
+                await status.complete(description)
+            else:
+                await status.activity(description)
 
         async def emit_notification(content: str, *, type: str = "warning") -> None:
-            """Emit a notification via StatusEmitter if available, else fall back to a raw notification event."""
-            if status and hasattr(status, "notification"):
-                await status.notification(content, type=type)
-                return
-            await self.emit_event(
-                {"type": "notification", "data": {"type": type, "content": content}},
-                __event_emitter__,
-            )
+            """Emit a notification via StatusEmitter."""
+            await status.notification(content, type=type)
 
         if not __files__:
             return blocks_by_user_msg, processed_filenames
@@ -463,13 +449,7 @@ class PipeRequestFilesMethods:
         user_msg_count = sum(1 for m in processed_messages if m["role"] == "user")
         current_user_msg_num = max(0, user_msg_count - 1)  # 0-based
 
-        client = None
-        try:
-            from anthropic import AsyncAnthropic
-            client = self._build_anthropic_client(self.valves.ANTHROPIC_API_KEY)
-        except ImportError:
-            logger.warning("Anthropic SDK not available for file upload")
-            return blocks_by_user_msg, processed_filenames
+        client = self._build_anthropic_client(self.valves.ANTHROPIC_API_KEY)
 
         for file in __files__:
             # Skip non-file entries (RAG chunks, knowledge base refs, etc.)
@@ -582,34 +562,17 @@ class PipeRequestFilesMethods:
         if not skill_names:
             return []
 
-        status = None
-        if __event_emitter__:
-            status_cls = globals().get("StatusEmitter")
-            status = status_cls(__event_emitter__) if status_cls else None
+        status = StatusEmitter(__event_emitter__) if __event_emitter__ else None
 
         async def emit_status(description: str, *, done: bool = False, hidden: bool | None = None) -> None:
-            """Emit a status update via StatusEmitter if available, else fall back to a raw status event."""
-            if not __event_emitter__:
-                return
+            """Emit a status update via StatusEmitter."""
             if status:
                 await status.emit(description, done=done, hidden=hidden)
-                return
-            data: dict[str, Any] = {"description": description, "done": done}
-            if hidden is not None:
-                data["hidden"] = hidden
-            await self.emit_event({"type": "status", "data": data}, __event_emitter__)
 
         async def emit_notification(content: str, *, type: str = "warning") -> None:
-            """Emit a notification via StatusEmitter if available, else fall back to a raw notification event."""
-            if not __event_emitter__:
-                return
-            if status and hasattr(status, "notification"):
+            """Emit a notification via StatusEmitter."""
+            if status:
                 await status.notification(content, type=type)
-                return
-            await self.emit_event(
-                {"type": "notification", "data": {"type": type, "content": content}},
-                __event_emitter__,
-            )
 
         # Initialize cache for this API key if needed
         if api_key not in self._validated_skills_cache:
@@ -629,8 +592,6 @@ class PipeRequestFilesMethods:
             await emit_status("🔧 Validating Skills...", hidden=True)
 
             try:
-                from anthropic import AsyncAnthropic
-
                 client = self._build_anthropic_client(api_key)
 
                 # Fetch all available skills

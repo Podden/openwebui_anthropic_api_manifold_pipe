@@ -239,17 +239,6 @@ class AdvisorResultBlockHandler(BaseHandler):
         return True
 
 
-class ContextClearedBlockHandler(BaseHandler):
-    """Notice that context editing dropped earlier tool results or thinking."""
-
-    block_types = ("context_cleared",)
-
-    async def on_start(self, event: Any, ctx: Any) -> bool:
-        """Report how many tokens context editing removed."""
-        await handle_context_cleared_block_start(getattr(event, "content_block", None), ctx)
-        return True
-
-
 def default_handlers() -> list[Any]:
     """Every handler the pipe registers, one per content_block family."""
     return [
@@ -263,5 +252,4 @@ def default_handlers() -> list[Any]:
         CodeExecutionResultBlockHandler(),
         ToolSearchResultBlockHandler(),
         AdvisorResultBlockHandler(),
-        ContextClearedBlockHandler(),
     ]

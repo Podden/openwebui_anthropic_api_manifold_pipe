@@ -282,6 +282,13 @@ class PipeStreamSupportMethods:
                     "data": {
                         "title": f"Run tool: {name}?",
                         "message": f"The model wants to call `{name}` with:\n\n```json\n{args}\n```",
+                        # OpenWebUI >= 0.12 shows its native Tool Permissions
+                        # dialog (incl. "always allow") when tool_call is set.
+                        "tool_call": {
+                            "id": tool_call_data.get("id"),
+                            "name": name,
+                            "arguments": tool_call_data.get("input") or {},
+                        },
                     },
                 }
             )
@@ -291,7 +298,9 @@ class PipeStreamSupportMethods:
             logger.warning("Tool approval prompt failed for '%s': %s", name, e)
             answer = False
 
-        if answer:
+        # Only a literal True approves: a timeout or closed tab comes back as a
+        # truthy {"error": ...} / {"status": "cancelled"} dict.
+        if answer is True:
             logger.info("Tool '%s' approved by user", name)
             return True, None
 
@@ -497,6 +506,7 @@ class PipeStreamSupportMethods:
         result_block_type: str = "",
         result_summary: str = "",
         result_display_body: str = "",
+        after_client: bool = False,
     ) -> str:
         """Persist a server_tool_use block (web_search, web_fetch, code_execution…)
         as collapsible <details> HTML carrying the opaque payload in a
@@ -587,12 +597,14 @@ class PipeStreamSupportMethods:
         # <summary> and </details>. Markdown tokenizer treats `\n\n` as
         # block break and splits the adjacent <details> out of the group.
         body_part = f"{body_src}\n" if body_src else ""
+        after_client_attr = ' data-after-client="true"' if after_client else ""
         return (
             f'<details type="tool_calls" done="true"'
             f' data-block-kind="server_tool_use"'
             f' data-tool-name="{html.escape(tool_name)}"'
             f' data-tool-use-id="{html.escape(tool_use_id)}"'
             f' data-payload-b64="{payload_b64}"'
+            f'{after_client_attr}'
             f'{result_attrs}>\n'
             f'<summary>{html.escape(summary_text)}</summary>\n'
             f"{body_part}"
@@ -889,49 +901,6 @@ class PipeStreamSupportMethods:
             attrs += f' output="{html.escape(output_json)}"'
 
         return f"<details {attrs}>\n<summary>{summary}</summary>\n{display}\n</details>\n"
-
-    async def _emit_code_execution_source(
-        self,
-        emit_event_local: Callable,
-        code: str,
-        language: str,
-        stdout: str = "",
-        stderr: str = "",
-        return_code: int = None,
-        download_links: list = None,
-        tool_calls_info: list = None,
-    ) -> None:
-        """Emit code execution output as a source/citation event for the citation panel."""
-        output_parts = []
-        if stdout:
-            output_parts.append(f"stdout:\n{stdout}")
-        if stderr:
-            output_parts.append(f"stderr:\n{stderr}")
-        if return_code is not None and return_code != 0:
-            output_parts.append(f"Return code: {return_code}")
-        if download_links:
-            output_parts.append("Files:\n" + "\n".join(download_links))
-
-        output_text = "\n\n".join(output_parts) if output_parts else "(no output)"
-
-        # Build a concise code summary for the source name
-        code_preview = code[:80].replace("\n", " ").strip() + "..." if code and len(code) > 80 else (code or "").replace("\n", " ").strip()
-        source_name = f"💻 {language}: {code_preview}" if code_preview else f"💻 Code Execution ({language})"
-
-        source_data = {
-            "source": {
-                "name": source_name,
-            },
-            "document": [output_text],
-            "metadata": [
-                {
-                    "source": f"code_execution_{language}_{id(code)}",
-                    "name": source_name,
-                }
-            ],
-        }
-
-        await emit_event_local({"type": "source", "data": source_data})
 
     @staticmethod
     def _try_parse_partial_json(buffer: str):

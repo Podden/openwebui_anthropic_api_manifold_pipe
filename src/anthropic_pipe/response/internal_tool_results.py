@@ -1,4 +1,4 @@
-"""Advisor, tool-search, and context-management result handlers."""
+"""Advisor and tool-search result handlers."""
 from __future__ import annotations
 
 import html
@@ -91,6 +91,7 @@ async def handle_advisor_result_block_start(content_block: Any, ctx: Any) -> Non
                 tool_name=carrier_info["tool_name"],
                 tool_use_id=tool_use_id,
                 tool_input=carrier_info["tool_input"],
+                after_client=carrier_info.get("after_client", False),
                 result_payload=serialized_content,
                 result_block_type="advisor_tool_result",
                 result_summary=status_desc,
@@ -156,6 +157,7 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
                 tool_name=carrier_info["tool_name"],
                 tool_use_id=tool_use_id,
                 tool_input=carrier_info["tool_input"],
+                after_client=carrier_info.get("after_client", False),
                 result_payload=serialized_content,
                 result_block_type="tool_search_tool_result",
                 result_summary=status_desc,
@@ -172,29 +174,3 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
             )
             await ctx.emit_block(standalone)
 
-
-async def handle_context_cleared_block_start(content_block: Any, ctx: Any) -> None:
-    """Handle a ``context_management`` content_block_start (context_cleared event); emits a status describing how many tokens were cleared."""
-    cleared_info = getattr(content_block, "cleared", {})
-    cleared_type = (
-        getattr(cleared_info, "type", "unknown")
-        if hasattr(cleared_info, "type")
-        else cleared_info.get("type", "unknown")
-    )
-    cleared_tokens = (
-        getattr(cleared_info, "tokens_cleared", 0)
-        if hasattr(cleared_info, "tokens_cleared")
-        else cleared_info.get("tokens_cleared", 0)
-    )
-
-    if cleared_type == "tool_uses":
-        status_desc = f"🧹 Cleared tool results: ~{cleared_tokens:,} tokens removed"
-    elif cleared_type == "thinking":
-        status_desc = f"🧹 Cleared thinking blocks: ~{cleared_tokens:,} tokens removed"
-    else:
-        status_desc = f"🧹 Context cleared: ~{cleared_tokens:,} tokens removed"
-
-    # activity, not complete: context editing happens mid-turn, and a done=True
-    # status would close the line while the model keeps generating.
-    await ctx.status.activity(status_desc)
-    logger.debug("Context cleared: type=%s, tokens=%s", cleared_type, cleared_tokens)

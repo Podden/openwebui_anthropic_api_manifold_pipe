@@ -24,34 +24,7 @@ async def create_request_payload(
 ) -> tuple[dict, dict, List[str], List[str]]:
     """Build the Anthropic API request payload, headers, and marker/tool metadata for one turn."""
 
-    status_cls = globals().get("StatusEmitter")
-    if status_cls:
-        status = status_cls(__event_emitter__)
-    else:
-        class _PayloadStatus:
-            def __init__(self, emit_event):
-                """Store the OpenWebUI event emitter callback."""
-                self._emit_event = emit_event
-
-            async def activity(self, description: str) -> None:
-                """Emit an in-progress status event."""
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": False}}
-                )
-
-            async def complete(self, description: str) -> None:
-                """Emit a completed status event."""
-                await self._emit_event(
-                    {"type": "status", "data": {"description": description, "done": True}}
-                )
-
-            async def notification(self, content: str, *, type: str = "warning") -> None:
-                """Emit a notification event."""
-                await self._emit_event(
-                    {"type": "notification", "data": {"type": type, "content": content}}
-                )
-
-        status = _PayloadStatus(__event_emitter__)
+    status = StatusEmitter(__event_emitter__)
 
     ## General payload creation
     actual_model_name = body["model"].split("/")[-1]
@@ -452,36 +425,14 @@ async def create_request_payload(
 
     beta_headers: list[str] = []
 
-    # Enable prompt caching if not disabled
-    if pipe.valves.CACHE_CONTROL != "cache disabled":
-        beta_headers.append("prompt-caching-2024-07-31")
-
-    # Add code-execution beta header ONLY when we explicitly added code_execution to tools.
-    # Do NOT add when using dynamic filtering v20260209 web tools — those auto-inject
-    # code_execution internally and the beta header would cause a second injection → duplicate error.
-    if has_code_execution:
-        # code_execution_20260120 doesn't need the old beta header
-        code_exec_is_new = any(
-            t.get("type") == "code_execution_20260120" for t in tools_list
-        )
-        if not code_exec_is_new:
-            beta_headers.append("code-execution-2025-08-25")
-        if activate_code_execution:
-            beta_headers.append("files-api-2025-04-14")
+    if has_code_execution and activate_code_execution:
+        beta_headers.append("files-api-2025-04-14")
     if (
         pipe.valves.ENABLE_INTERLEAVED_THINKING
         and model_info["supports_thinking"]
         and not model_info["supports_adaptive_thinking"]
     ):
         beta_headers.append("interleaved-thinking-2025-05-14")
-
-    # Add web_fetch beta header when using the older version (20250910)
-    # The newer 20260209 version doesn't need a beta header
-    uses_old_web_fetch = any(
-        t.get("type") == "web_fetch_20250910" for t in tools_list
-    )
-    if pipe.valves.WEB_FETCH and uses_old_web_fetch:
-        beta_headers.append("web-fetch-2025-09-10")
 
     # Add Files API beta header when files were uploaded but code_execution
     # wasn't otherwise activated (standalone file upload scenario)
@@ -517,69 +468,9 @@ async def create_request_payload(
         payload["container"] = previous_container_id
         logger.info(f"📦 Reusing container from previous turn: {previous_container_id}")
 
-    # Add advanced tool use beta (for programmatic calling and tool search)
-    if __user__["valves"].ENABLE_TOOL_SEARCH or pipe.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-        beta_headers.append("advanced-tool-use-2025-11-20")
-
     # Add advisor tool beta
     if __user__["valves"].ENABLE_ADVISOR_TOOL:
         beta_headers.append("advisor-tool-2026-03-01")
-
-    # Add context editing strategies if enabled
-    context_editing_strategy = __user__["valves"].CONTEXT_EDITING_STRATEGY
-    if context_editing_strategy != "none":
-        if "context-management-2025-06-27" not in beta_headers:
-            beta_headers.append("context-management-2025-06-27")
-
-        # Build context_management array for payload
-        # IMPORTANT: clear_thinking must be FIRST if present (API requirement)
-        context_management = []
-
-        # Add clear_thinking FIRST if needed
-        if (
-            context_editing_strategy in ["clear_thinking", "clear_both"]
-            and enable_thinking
-            and model_info["supports_thinking"]
-        ):
-            _keep_val = __user__["valves"].CONTEXT_EDITING_THINKING_KEEP
-            clear_thinking = {
-                "type": "clear_thinking_20251015",
-                # keep=0 → "all" (preserve all thinking → stable prompt cache).
-                # keep>0 → sliding window (breaks cache every turn past threshold).
-                "keep": "all" if _keep_val <= 0 else {
-                    "type": "thinking_turns",
-                    "value": _keep_val,
-                },
-            }
-            context_management.append(clear_thinking)
-
-        # Add clear_tool_uses SECOND
-        if (
-            context_editing_strategy in ["clear_tool_results", "clear_both"]
-            and len(tools_list) > 2
-        ):
-            clear_tool_uses = {
-                "type": "clear_tool_uses_20250919",
-                "trigger": {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_TRIGGER,
-                },
-                "keep": {
-                    "type": "tool_uses",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_KEEP,
-                },
-            }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST > 0:
-                clear_tool_uses["clear_at_least"] = {
-                    "type": "input_tokens",
-                    "value": __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_AT_LEAST,
-                }
-            if __user__["valves"].CONTEXT_EDITING_TOOL_CLEAR_TOOL_INPUT:
-                clear_tool_uses["clear_tool_inputs"] = True
-            context_management.append(clear_tool_uses)
-
-        if context_management:
-            payload["context_management"] = {"edits": context_management}
 
     # OpenWebUI's own Context Compaction (admin setting, runs before any filter
     # or pipe) has already summarized this chat when its marker sits in the
@@ -617,9 +508,7 @@ async def create_request_payload(
             payload["context_management"] = {"edits": []}
         payload["context_management"]["edits"].append(compact_edit)
 
-    # Add effort beta header and output_config if effort is configured
     if model_info["supports_effort"] and effort_config:
-        beta_headers.append("effort-2025-11-24")
         payload["output_config"] = effort_config
 
     # Add Fast Mode beta header whenever the request actually asks for fast
@@ -704,31 +593,31 @@ async def create_request_payload(
         # Add betas list to payload for beta.messages.stream
         payload["betas"] = beta_headers
 
-        ## Tool Choice Handling
-        if __metadata__.get("web_search_enforced"):
-            # Check if web_search is actually in the tools list
-            has_web_search = any(t.get("name") == "web_search" for t in tools_list)
-            if has_web_search:
-                if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
-                    payload["tool_choice"] = {"type": "auto"}
-                    logger.info(
-                        f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
-                    )
-                elif "thinking" not in payload:
-                    # No thinking active - enforce web_search
-                    payload["tool_choice"] = {"type": "tool", "name": "web_search"}
-                    logger.debug("Enforcing web_search via tool_choice")
-                else:
-                    # Thinking is active - cannot enforce web_search, but it's still available
-                    payload["tool_choice"] = {"type": "auto"}
-                    logger.debug(
-                        "Thinking active - web_search added but not enforced (tool_choice=auto)"
-                    )
-            else:
-                # No enforcement - use auto tool choice
+    ## Tool Choice Handling
+    if __metadata__.get("web_search_enforced"):
+        # Check if web_search is actually in the tools list
+        has_web_search = any(t.get("name") == "web_search" for t in tools_list)
+        if has_web_search:
+            if "thinking" not in payload and not model_info.get("supports_forced_tool_choice", True):
                 payload["tool_choice"] = {"type": "auto"}
+                logger.info(
+                    f"{actual_model_name} rejects forced tool_choice - web_search added but not enforced (tool_choice=auto)"
+                )
+            elif "thinking" not in payload:
+                # No thinking active - enforce web_search
+                payload["tool_choice"] = {"type": "tool", "name": "web_search"}
+                logger.debug("Enforcing web_search via tool_choice")
+            else:
+                # Thinking is active - cannot enforce web_search, but it's still available
+                payload["tool_choice"] = {"type": "auto"}
+                logger.debug(
+                    "Thinking active - web_search added but not enforced (tool_choice=auto)"
+                )
+        else:
+            # No enforcement - use auto tool choice
+            payload["tool_choice"] = {"type": "auto"}
 
-    # API tool_choice passthrough (outside beta_headers block)
+    # API tool_choice passthrough
     # If no tool_choice was set by web_search enforcement, pass through from body
     if "tool_choice" not in payload and body.get("tool_choice"):
         api_tc = body["tool_choice"]
@@ -820,15 +709,24 @@ async def create_request_payload(
 
     # Tool search nudge: deferred tools are stripped from the prompt prefix, so the
     # model can't see them and tends to claim it lacks the capability. Tell it to
-    # search first. Static text → does not churn the cache across turns.
-    if any(isinstance(_t, dict) and _t.get("defer_loading") for _t in tools_list):
+    # search first. The deferred names are listed (Anthropic's tool search tips:
+    # name what can be searched for); without them the model picked web_search over
+    # a deferred get_weather the user asked for. Sorted, and a function of the tool
+    # set only, so it changes exactly when the tools array does -- no extra churn.
+    _deferred_names = sorted(
+        _t["name"] for _t in tools_list
+        if isinstance(_t, dict) and _t.get("defer_loading") and _t.get("name")
+    )
+    if _deferred_names:
         _tool_search_nudge = {
             "type": "text",
             "text": (
                 "Some available tools are not listed directly in this request; they are "
                 "loaded on demand via the tool search tool (tool_search_tool_*). Before "
                 "telling the user you cannot do something or that you lack access to a tool, "
-                "call the tool search tool to find a relevant tool, then use whatever it returns."
+                "call the tool search tool to find a relevant tool, then use whatever it returns. "
+                "Prefer a matching tool from this list over web search: "
+                + ", ".join(_deferred_names)
             ),
         }
         if isinstance(system_messages, list):
@@ -837,6 +735,25 @@ async def create_request_payload(
             system_messages = [{"type": "text", "text": str(system_messages)}, _tool_search_nudge]
         else:
             system_messages = [_tool_search_nudge]
+
+    # Open Terminal + Anthropic's code execution sandbox in one request: asked to
+    # "run X in the terminal", the model used the sandbox (bash_code_execution),
+    # which cannot see the user's machine. Static text, only in that combination.
+    _tool_names = {_t.get("name") for _t in tools_list if isinstance(_t, dict)}
+    if (__metadata__ or {}).get("terminal_id") and "code_execution" in _tool_names:
+        _terminal_hint = {
+            "type": "text",
+            "text": (
+                "The user's terminal is reached only through the terminal tools "
+                f"({', '.join(sorted(_tool_names & {'bash', 'run_command', 'str_replace_based_edit_tool', 'write_file', 'read_file'})) or 'run_command'}). "
+                "code_execution is a separate, isolated sandbox without access to the user's "
+                "terminal or files; use it only for calculations or analysis, never when the "
+                "user refers to their terminal, machine or files there."
+            ),
+        }
+        system_messages = (system_messages if isinstance(system_messages, list)
+                           else ([{"type": "text", "text": str(system_messages)}] if system_messages else []))
+        system_messages = system_messages + [_terminal_hint]
 
     # Processing Messages and Caching
     if system_messages and len(system_messages) > 0:

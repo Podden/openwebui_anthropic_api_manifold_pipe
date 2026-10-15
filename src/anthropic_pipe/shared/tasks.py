@@ -163,19 +163,19 @@ class PipeTaskSupportMethods:
             if task_system:
                 task_payload["system"] = task_system
 
-            logger.debug(f"Task payload: {json.dumps(task_payload, indent=2)}")
-            try:
-                logger.debug(
-                    "[PAYLOAD] task %s",
-                    json.dumps(
-                        self._strip_payload(task_payload),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        default=str,
-                    ),
-                )
-            except Exception as _pl_err:
-                logger.debug(f"[PAYLOAD] task strip/log failed: {_pl_err}")
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    logger.debug(
+                        "[PAYLOAD] task %s",
+                        json.dumps(
+                            self._strip_payload(task_payload),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        ),
+                    )
+                except Exception as _pl_err:
+                    logger.debug(f"[PAYLOAD] task strip/log failed: {_pl_err}")
 
             # Make synchronous request to Anthropic API
             # For task requests, we don't have __user__ context, so use default key

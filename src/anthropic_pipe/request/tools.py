@@ -45,6 +45,15 @@ class PipeRequestToolsMethods:
         # Names reserved for Anthropic server-side tools (skip if found in body.tools)
         anthropic_server_tool_names = {"web_search", "web_fetch"}
 
+        # OpenWebUI >= 0.12 Tool Search: OWUI holds large tools back from
+        # body.tools, adds its own `search_tools` and lists the held-back names
+        # in a system-prompt manifest. Claude has native tool search, so the
+        # held-back tools are sent with `defer_loading` instead and OWUI's
+        # `search_tools` is dropped (the manifest is stripped in pipe()).
+        owui_deferred = set((__metadata__ or {}).get("deferred_tools") or [])
+        if owui_deferred:
+            anthropic_server_tool_names = anthropic_server_tool_names | {OWUI_SEARCH_TOOL_NAME}
+
         # Open Terminal bridge activation: if native bash / text_editor tools
         # are enabled AND the required Open Terminal callables are present,
         # route Claude's native tool calls through them and hide the raw
@@ -96,7 +105,9 @@ class PipeRequestToolsMethods:
                 if tool_entry.get("type") == "function":
                     func = tool_entry.get("function", {})
                     name = func.get("name")
-                    if not name or name in tool_names_seen:
+                    # Private helpers (`_get_client`, ...) can sit in a tool's
+                    # stored specs; they are not callable tools.
+                    if not name or name in tool_names_seen or name.startswith("_"):
                         continue
 
                     # Skip tools that will be handled by Anthropic server-side tools
@@ -328,6 +339,9 @@ class PipeRequestToolsMethods:
                 if name in tool_names_seen:
                     continue
 
+                if name in anthropic_server_tool_names:
+                    continue
+
                 # Skip if toolname starts with _ or __
                 if name.startswith("_"):
                     logger.debug(f"Skipping private tool: {name}")
@@ -382,7 +396,13 @@ class PipeRequestToolsMethods:
         for claude_tool in claude_tools:
             # Check if tool should be deferred for tool search
             # IMPORTANT: Skip deferring when programmatic tool calling is active.
-            if _defer_active:
+            if (
+                claude_tool.get("name") in owui_deferred
+                and not is_programmatic_active
+                and claude_tool["name"] != forced_tool_name
+            ):
+                claude_tool["defer_loading"] = True
+            elif _defer_active:
                 # Skip deferring if tool is in exclusion list, or if the caller
                 # executes the tool itself. A passthrough tool is one the client
                 # sent in body.tools and will run on its own; making the model
@@ -444,6 +464,6 @@ class PipeRequestToolsMethods:
                 flags.append(f"type={t['type']}")
             if t.get("eager_input_streaming"):
                 flags.append("eager_stream")
-            logger.info(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
+            logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names

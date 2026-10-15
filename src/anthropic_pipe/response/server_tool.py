@@ -242,10 +242,15 @@ async def handle_server_tool_use_block_stop(ctx: Any) -> None:
             tool_input = json.loads(server_tool.input_buffer) if server_tool.input_buffer else {}
         except (json.JSONDecodeError, ValueError):
             tool_input = {}
+        # A server tool called after a client tool_use in the same response runs
+        # only after the client round trip: its result opens the NEXT assistant
+        # message. Replay needs to know, or it moves the call there too.
+        after_client = bool(ctx.state.tool_use.progress_blocks)
         persisted_block = ctx.pipe._format_server_tool_use_block(
             tool_name=server_tool.active_name,
             tool_use_id=server_tool.active_id,
             tool_input=tool_input,
+            after_client=after_client,
         )
         await ctx.emit_block(persisted_block)
         # The matching *_tool_result block pops this to merge its output into the
@@ -254,6 +259,7 @@ async def handle_server_tool_use_block_stop(ctx: Any) -> None:
             "block": persisted_block,
             "tool_name": server_tool.active_name,
             "tool_input": tool_input,
+            "after_client": after_client,
         }
 
     server_tool.active_name = None

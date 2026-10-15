@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.33`
+- **Current pipe version:** `0.9.39`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
@@ -233,6 +233,36 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.9.39`
+- Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on
+- Prompt cache kept for tool calls with two or more arguments (e.g. tool search's `query` + `limit`): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: `messages_changed`)
+- A server tool the model calls right after a client tool in the same response (e.g. `bash` after `view_knowledge_file`) stays in that assistant message on replay instead of moving into the next one
+- Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool
+- Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead
+- `CACHE-DIFF` debug log no longer reports block key-order differences as breaks (the API ignores them; only tool `input` order counts). The `[PAYLOAD]` log line lists deferred tools
+
+### `v0.9.38`
+- Estimated USD cost per turn (new `SHOW_COST` user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the `SHOW_TOKEN_COUNT` status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the `MODEL_PRICING_OVERRIDES` valve (JSON, USD per MTok)
+- The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
+
+### `v0.9.37`
+- Removed the beta headers of features Anthropic made generally available (effort, code execution 20250825, web fetch 20250910, tool search / programmatic tool calling, prompt caching); verified live without them
+- Removed context editing (`CONTEXT_EDITING_*` user valves): off by default, and it invalidated the prompt cache whenever it cleared. Compaction stays
+
+### `v0.9.36`
+- OpenWebUI < 0.10 only: the auto-switch to native function calling is back, gated on the running version. From 0.10 on an unset `function_calling` already means native, so the pipe no longer rewrites model rows there or overrides an explicit "legacy"
+
+### `v0.9.35`
+- Removed the native-function-calling auto-switch for OpenWebUI 0.12, where it rewrote every model row without the param, showed a "re-run your query" toast and overrode "legacy" (restored for < 0.10 in v0.9.36)
+- `web_search` enforcement (`tool_choice`) no longer depends on any beta header being sent; with caching and all betas off it was silently skipped
+- Dead code removed (unused helpers, SDK < 0.121 shims, fallback emitters); payload/task JSON dumps only serialize at DEBUG; per-tool log lines moved to DEBUG
+
+### `v0.9.34`
+- OpenWebUI 0.12 Tool Search: tools OpenWebUI holds back are sent with native `defer_loading` (Claude's tool search); OpenWebUI's `search_tools` and its `<available_tools>` manifest are dropped
+- Tool approval uses OpenWebUI 0.12's native Tool Permissions dialog (`tool_call` in the confirmation event). Only an explicit allow approves; a timed-out or closed dialog no longer counts as approval
+- Private tool helpers (names starting with `_`) stored in a tool's specs are no longer sent to the model
+- Removed the dead skill-id resolution; skill tools come from OpenWebUI, gated by the model's Builtin Tools > Skills switch
+
 ### `v0.9.33`
 - Fast mode falls back to standard speed on a `429`. Fast requests are sent without SDK retries; when fast mode is rate-limited (or not enabled for your organization: fast mode is a research preview, limit `0`), the turn is retried at standard speed and a warning notification says so, instead of failing with "Rate limit exceeded" after several backoffs. The fallback costs one prompt-cache miss, since fast and standard requests share no cached prefix
 

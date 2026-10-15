@@ -150,7 +150,7 @@ def test_pydantic_valve_field(m):
     # Reload, the way OpenWebUI does with Valves(**stored_values).
     reloaded = Valves(**valves.model_dump())
     assert reloaded.model_dump()["ANTHROPIC_API_KEY"] == stored, "reload must not re-encrypt"
-    assert reloaded.ANTHROPIC_API_KEY.get_secret() == PLAINTEXT
+    assert m.decrypt_valve_secret(reloaded.ANTHROPIC_API_KEY) == PLAINTEXT
 
     assert Valves().model_dump()["ANTHROPIC_API_KEY"] == "", "default must stay empty"
 
