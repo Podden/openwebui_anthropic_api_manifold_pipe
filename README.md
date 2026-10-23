@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.10.0`
+- **Current pipe version:** `0.10.1`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
@@ -91,6 +91,8 @@ Recent OpenWebUI releases matter for this pipe:
    - multiselect valve inputs
 - **0.11.3**
    - OpenWebUI's own Context Compaction (Admin → Interface). When it has summarized a chat, the pipe's API-side compaction steps aside for that request
+- **0.12.3**
+   - OpenWebUI's own Tool Search (Admin → Interface) holds large tools back behind `search_tools` / `call_tool`. With `ENABLE_TOOL_SEARCH` on, Claude's native tool search replaces it; with it off, OpenWebUI's Tool Search runs and the pipe resolves `call_tool` in its tool loop
 
 If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.9.0+` moved DB/model helpers to async. The pipe is already migrated, but custom additions must also follow the async model/helper rules. See the official migration guide: https://docs.openwebui.com/features/extensibility/plugin/migration/to-0.9.0
 
@@ -169,7 +171,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `ENABLE_TOOL_SEARCH` | `true` | Deferred tool loading with search for large tool sets (beta `advanced-tool-use-2025-11-20`) |
+| `ENABLE_TOOL_SEARCH` | `true` | Claude's native deferred tool loading with search for large tool sets. Wins over OpenWebUI's own Tool Search; off: OpenWebUI's Tool Search runs if enabled, otherwise no tool search |
 | `TOOL_SEARCH_TYPE` | `bm25` | Tool search mode: `bm25` or `regex` |
 | `TOOL_SEARCH_MAX_DESCRIPTION_LENGTH` | `100` | Tools with longer JSON definitions are deferred for lazy loading |
 | `TOOL_SEARCH_EXCLUDE_TOOLS` | Anthropic server tools + OpenWebUI built-ins + Open Terminal tools | Multiselect: always keep these tools loaded. Tools passed in the request body are never deferred |
@@ -234,6 +236,10 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.10.1`
+- OpenWebUI Tool Search with `ENABLE_TOOL_SEARCH` on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text
+- `ENABLE_TOOL_SEARCH` off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search
+
 ### `v0.10.0`
 - API version `2026-10-21` and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe)
 - `temperature` / `top_p` / `top_k` from model params are no longer sent. `2026-10-21` rejects them on every model, and with SDK 1.9+ they already failed with a `TypeError` on Haiku 4.5, Sonnet 4.5 and Opus 4.5

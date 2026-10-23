@@ -49,6 +49,34 @@ def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
     return kept
 
 
+def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, str | None]:
+    """Unwrap OpenWebUI's ``call_tool`` dispatcher into the tool it names.
+
+    Same checks and messages as ``open_webui.utils.tool_search.resolve_tool_call``,
+    which only runs in OpenWebUI's own tool loop, not in ours. ``params`` may
+    also come as an object: the pipe does not send the dispatcher as strict.
+    Returns ``(tool_name, args, error)``.
+    """
+    try:
+        if not isinstance(tool_input, dict) or set(tool_input) != {"tool_name", "params"}:
+            raise ValueError("call_tool requires tool_name and params.")
+        name = tool_input["tool_name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("tool_name must be a non-empty string.")
+        if name in {OWUI_SEARCH_TOOL_NAME, OWUI_CALL_TOOL_NAME}:
+            raise ValueError("call_tool cannot invoke search_tools or itself.")
+        if name not in tools:
+            raise ValueError(f'Tool "{name}" is not available. Search for an available tool.')
+        params = tool_input["params"]
+        if isinstance(params, str):
+            params = json.loads(params) if params.strip() else {}
+        if not isinstance(params, dict):
+            raise ValueError("params must decode to a JSON object.")
+    except (TypeError, ValueError) as error:
+        return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
+    return name, params, None
+
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     """Handle a ``tool_use`` content_block_start; emits an in-progress tool-call block to OpenWebUI (unless inside code execution)."""
     tool_use = ctx.state.tool_use
@@ -158,8 +186,25 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         tool_name = tool_call_data.get("name", "")
         tool_input = tool_call_data.get("input", {})
 
+        # OpenWebUI Tool Search dispatcher, sent only while Claude's own tool
+        # search is off (request/tools.py): run the tool it names. The result
+        # still answers the call_tool tool_use (tool_call_data is unchanged).
+        call_tool_error = None
+        if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
+            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+
         tool = tools.get(tool_name) if tools else None
-        if (
+        if call_tool_error:
+
+            async def call_tool_error_result(message=call_tool_error):
+                """Return the dispatcher's validation error as the tool result."""
+                return message
+
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(tool_call_data, call_tool_error_result())
+            )
+            running_tool_tasks.append(task)
+        elif (
             tool_name == "bash"
             and pipe.valves.ENABLE_BASH_TOOL
             and tools

@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.0
+version: 0.10.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,10 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.1
+- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
+- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
+
 v0.10.0
 - API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
 - temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
@@ -52,10 +56,6 @@ v0.9.39
 - Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool.
 - Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead.
 - CACHE-DIFF debug log no longer reports block key-order differences as breaks; the API ignores them (measured), only tool `input` order counts. The [PAYLOAD] log line lists deferred tools.
-
-v0.9.38
-- Estimated USD cost per turn (new SHOW_COST user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the SHOW_TOKEN_COUNT status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
-- The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
 
 """
 
@@ -199,6 +199,7 @@ DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
 )
 
 OWUI_SEARCH_TOOL_NAME = "search_tools"
+OWUI_CALL_TOOL_NAME = "call_tool"
 OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
 
 def normalize_tool_name_list(value: Any) -> set[str]:
@@ -1627,6 +1628,26 @@ def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
         )
     return kept
 
+def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, str | None]:
+    try:
+        if not isinstance(tool_input, dict) or set(tool_input) != {"tool_name", "params"}:
+            raise ValueError("call_tool requires tool_name and params.")
+        name = tool_input["tool_name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("tool_name must be a non-empty string.")
+        if name in {OWUI_SEARCH_TOOL_NAME, OWUI_CALL_TOOL_NAME}:
+            raise ValueError("call_tool cannot invoke search_tools or itself.")
+        if name not in tools:
+            raise ValueError(f'Tool "{name}" is not available. Search for an available tool.')
+        params = tool_input["params"]
+        if isinstance(params, str):
+            params = json.loads(params) if params.strip() else {}
+        if not isinstance(params, dict):
+            raise ValueError("params must decode to a JSON object.")
+    except (TypeError, ValueError) as error:
+        return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
+    return name, params, None
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use = ctx.state.tool_use
     server_tool = ctx.state.server_tool
@@ -1728,8 +1749,21 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         tool_name = tool_call_data.get("name", "")
         tool_input = tool_call_data.get("input", {})
 
+        call_tool_error = None
+        if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
+            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+
         tool = tools.get(tool_name) if tools else None
-        if (
+        if call_tool_error:
+
+            async def call_tool_error_result(message=call_tool_error):
+                return message
+
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(tool_call_data, call_tool_error_result())
+            )
+            running_tool_tasks.append(task)
+        elif (
             tool_name == "bash"
             and pipe.valves.ENABLE_BASH_TOOL
             and tools
@@ -3244,7 +3278,7 @@ class Pipe:
         )
         ENABLE_TOOL_SEARCH: bool = Field(
             default=True,
-            description="Enables a tool to search for tools before use. Trades latency for token efficiency.",
+            description="Enables a tool to search for tools before use. Trades latency for token efficiency. Wins over OpenWebUI's own Tool Search (Admin > Interface): the tools OpenWebUI holds back go out with Claude's native deferred loading and its search_tools / call_tool are dropped. Off: OpenWebUI's Tool Search runs unchanged if it is on, otherwise no tool search at all.",
         )
         TOOL_SEARCH_TYPE: Literal["regex", "bm25"] = Field(
             default="bm25",
@@ -4589,9 +4623,16 @@ class Pipe:
 
         anthropic_server_tool_names = {"web_search", "web_fetch"}
 
+        native_tool_search = self._native_tool_search_active(actual_model_name, __user__)
         owui_deferred = set((__metadata__ or {}).get("deferred_tools") or [])
-        if owui_deferred:
-            anthropic_server_tool_names = anthropic_server_tool_names | {OWUI_SEARCH_TOOL_NAME}
+        owui_held_back: set[str] = set()
+        if owui_deferred and native_tool_search:
+            anthropic_server_tool_names = anthropic_server_tool_names | {
+                OWUI_SEARCH_TOOL_NAME,
+                OWUI_CALL_TOOL_NAME,
+            }
+        elif owui_deferred:
+            owui_held_back = owui_deferred
 
         has_run_command = bool(__tools__ and "run_command" in __tools__ and __tools__["run_command"].get("callable"))
         has_write_file = bool(__tools__ and "write_file" in __tools__ and __tools__["write_file"].get("callable"))
@@ -4648,7 +4689,9 @@ class Pipe:
                     body_user_tools.append(claude_tool)
                     tool_names_seen.add(name)
 
-                    if not (__tools__ and name in __tools__ and __tools__[name].get("callable")):
+                    if name != OWUI_CALL_TOOL_NAME and not (
+                        __tools__ and name in __tools__ and __tools__[name].get("callable")
+                    ):
                         api_tool_names.add(name)
 
             claude_tools.extend(sorted(body_user_tools, key=lambda t: t["name"]))
@@ -4833,6 +4876,9 @@ class Pipe:
                 if name in anthropic_server_tool_names:
                     continue
 
+                if name in owui_held_back:
+                    continue
+
                 if name.startswith("_"):
                     logger.debug(f"Skipping private tool: {name}")
                     continue
@@ -4863,12 +4909,6 @@ class Pipe:
 
             claude_tools.extend(sorted(user_tools, key=lambda t: t["name"]))
 
-        is_programmatic_active = False
-        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-            model_info_ptc = self.get_model_info(actual_model_name)
-            is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
-
-        _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
         user_excludes = normalize_tool_name_list(
             __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
         )
@@ -4876,12 +4916,12 @@ class Pipe:
         for claude_tool in claude_tools:
 
             if (
-                claude_tool.get("name") in owui_deferred
-                and not is_programmatic_active
+                native_tool_search
+                and claude_tool.get("name") in owui_deferred
                 and claude_tool["name"] != forced_tool_name
             ):
                 claude_tool["defer_loading"] = True
-            elif _defer_active:
+            elif native_tool_search:
 
                 name = claude_tool["name"]
                 if (
@@ -4934,6 +4974,13 @@ class Pipe:
             logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
+        if not __user__["valves"].ENABLE_TOOL_SEARCH:
+            return False
+        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
+            return not self.get_model_info(actual_model_name).get("supports_programmatic_calling", False)
+        return True
 
     async def _get_pdf_base64_from_file_id(self, file_id: str) -> Optional[tuple[str, str]]:
         if not FILES_AVAILABLE:
@@ -7477,7 +7524,11 @@ class Pipe:
             if __metadata__ is not None:
                 __metadata__.setdefault("params", {})["reasoning_tags"] = False
 
-            if __metadata__ and __metadata__.get("deferred_tools"):
+            if (
+                __metadata__
+                and __metadata__.get("deferred_tools")
+                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+            ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
                         msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])

@@ -210,10 +210,15 @@ class PipeOrchestratorMethods:
             if __metadata__ is not None:
                 __metadata__.setdefault("params", {})["reasoning_tags"] = False
 
-            # OpenWebUI Tool Search manifest: its tools go out with native
-            # `defer_loading` instead (request/tools.py), so the manifest's
-            # "call search_tools" instruction would point at a missing tool.
-            if __metadata__ and __metadata__.get("deferred_tools"):
+            # OpenWebUI Tool Search manifest: with Claude's tool search on, its
+            # tools go out with native `defer_loading` instead (request/tools.py),
+            # so the manifest's "call search_tools" instruction would point at a
+            # missing tool. With it off, OWUI's search runs and needs the manifest.
+            if (
+                __metadata__
+                and __metadata__.get("deferred_tools")
+                and self._native_tool_search_active(body["model"].split("/")[-1], __user__)
+            ):
                 for msg in body.get("messages", []):
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
                         msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])

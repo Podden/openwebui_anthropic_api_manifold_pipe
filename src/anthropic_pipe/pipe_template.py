@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.0
+version: 0.10.1
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,10 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.1
+- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
+- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
+
 v0.10.0
 - API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
 - temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
@@ -52,10 +56,6 @@ v0.9.39
 - Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool.
 - Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead.
 - CACHE-DIFF debug log no longer reports block key-order differences as breaks; the API ignores them (measured), only tool `input` order counts. The [PAYLOAD] log line lists deferred tools.
-
-v0.9.38
-- Estimated USD cost per turn (new SHOW_COST user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the SHOW_TOKEN_COUNT status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
-- The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
 
 """
 
@@ -291,9 +291,11 @@ DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
 )
 
 # OpenWebUI >= 0.12 Tool Search (open_webui/utils/tool_search.py): its
-# search tool and the `<available_tools>` manifest it appends to the system
-# prompt. Replaced by Claude's native tool search, see request/tools.py.
+# search tool, its `call_tool` dispatcher (0.12.3+) and the `<available_tools>`
+# manifest it appends to the system prompt. Replaced by Claude's native tool
+# search while ENABLE_TOOL_SEARCH is on, see request/tools.py.
 OWUI_SEARCH_TOOL_NAME = "search_tools"
+OWUI_CALL_TOOL_NAME = "call_tool"
 OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
 
 
@@ -1286,7 +1288,7 @@ class Pipe:
         )
         ENABLE_TOOL_SEARCH: bool = Field(
             default=True,
-            description="Enables a tool to search for tools before use. Trades latency for token efficiency.",
+            description="Enables a tool to search for tools before use. Trades latency for token efficiency. Wins over OpenWebUI's own Tool Search (Admin > Interface): the tools OpenWebUI holds back go out with Claude's native deferred loading and its search_tools / call_tool are dropped. Off: OpenWebUI's Tool Search runs unchanged if it is on, otherwise no tool search at all.",
         )
         TOOL_SEARCH_TYPE: Literal["regex", "bm25"] = Field(
             default="bm25",

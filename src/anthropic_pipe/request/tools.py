@@ -46,13 +46,22 @@ class PipeRequestToolsMethods:
         anthropic_server_tool_names = {"web_search", "web_fetch"}
 
         # OpenWebUI >= 0.12 Tool Search: OWUI holds large tools back from
-        # body.tools, adds its own `search_tools` and lists the held-back names
-        # in a system-prompt manifest. Claude has native tool search, so the
-        # held-back tools are sent with `defer_loading` instead and OWUI's
-        # `search_tools` is dropped (the manifest is stripped in pipe()).
+        # body.tools, adds its own `search_tools` + `call_tool` and lists the
+        # held-back names in a system-prompt manifest. With Claude's native tool
+        # search on, the held-back tools are sent with `defer_loading` instead and
+        # OWUI's two tools are dropped (the manifest is stripped in pipe()). With
+        # it off, OWUI's mechanism runs as is: the held-back tools stay out and
+        # `call_tool` is resolved in response/client_tool.py.
+        native_tool_search = self._native_tool_search_active(actual_model_name, __user__)
         owui_deferred = set((__metadata__ or {}).get("deferred_tools") or [])
-        if owui_deferred:
-            anthropic_server_tool_names = anthropic_server_tool_names | {OWUI_SEARCH_TOOL_NAME}
+        owui_held_back: set[str] = set()
+        if owui_deferred and native_tool_search:
+            anthropic_server_tool_names = anthropic_server_tool_names | {
+                OWUI_SEARCH_TOOL_NAME,
+                OWUI_CALL_TOOL_NAME,
+            }
+        elif owui_deferred:
+            owui_held_back = owui_deferred
 
         # Open Terminal bridge activation: if native bash / text_editor tools
         # are enabled AND the required Open Terminal callables are present,
@@ -131,8 +140,11 @@ class PipeRequestToolsMethods:
                     }
                     body_user_tools.append(claude_tool)
                     tool_names_seen.add(name)
-                    # Track as API-provided tool (no callable — for passthrough)
-                    if not (__tools__ and name in __tools__ and __tools__[name].get("callable")):
+                    # Track as API-provided tool (no callable — for passthrough).
+                    # OWUI's `call_tool` has no callable either but is resolved here.
+                    if name != OWUI_CALL_TOOL_NAME and not (
+                        __tools__ and name in __tools__ and __tools__[name].get("callable")
+                    ):
                         api_tool_names.add(name)
 
             claude_tools.extend(sorted(body_user_tools, key=lambda t: t["name"]))
@@ -347,6 +359,10 @@ class PipeRequestToolsMethods:
                 if name in anthropic_server_tool_names:
                     continue
 
+                # OpenWebUI's Tool Search held it back; Claude finds it via search_tools.
+                if name in owui_held_back:
+                    continue
+
                 # Skip if toolname starts with _ or __
                 if name.startswith("_"):
                     logger.debug(f"Skipping private tool: {name}")
@@ -385,29 +401,19 @@ class PipeRequestToolsMethods:
 
             claude_tools.extend(sorted(user_tools, key=lambda t: t["name"]))
 
-        # Check if programmatic tool calling is active for this model
-        # When active, tools must NOT be deferred (defer_loading) because
-        # deferred tools loaded via tool_search may bypass allowed_callers enforcement
-        is_programmatic_active = False
-        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
-            model_info_ptc = self.get_model_info(actual_model_name)
-            is_programmatic_active = model_info_ptc.get("supports_programmatic_calling", False)
-
-        _defer_active = __user__["valves"].ENABLE_TOOL_SEARCH and not is_programmatic_active
         user_excludes = normalize_tool_name_list(
             __user__["valves"].TOOL_SEARCH_EXCLUDE_TOOLS
         )
 
         for claude_tool in claude_tools:
             # Check if tool should be deferred for tool search
-            # IMPORTANT: Skip deferring when programmatic tool calling is active.
             if (
-                claude_tool.get("name") in owui_deferred
-                and not is_programmatic_active
+                native_tool_search
+                and claude_tool.get("name") in owui_deferred
                 and claude_tool["name"] != forced_tool_name
             ):
                 claude_tool["defer_loading"] = True
-            elif _defer_active:
+            elif native_tool_search:
                 # Skip deferring if tool is in exclusion list, or if the caller
                 # executes the tool itself. A passthrough tool is one the client
                 # sent in body.tools and will run on its own; making the model
@@ -472,3 +478,15 @@ class PipeRequestToolsMethods:
             logger.debug(f"  🔧 Tool: {t.get('name')} [{', '.join(flags) or 'normal'}]")
 
         return claude_tools, api_tool_names
+
+    def _native_tool_search_active(self, actual_model_name: str, __user__: Dict[str, Any]) -> bool:
+        """Claude's own tool search (defer_loading) applies to this request.
+
+        Off under programmatic tool calling: deferred tools loaded via tool
+        search may bypass allowed_callers enforcement.
+        """
+        if not __user__["valves"].ENABLE_TOOL_SEARCH:
+            return False
+        if self.valves.ENABLE_PROGRAMMATIC_TOOL_CALLING:
+            return not self.get_model_info(actual_model_name).get("supports_programmatic_calling", False)
+        return True
