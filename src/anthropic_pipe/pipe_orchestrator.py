@@ -1153,6 +1153,30 @@ class PipeOrchestratorMethods:
                             _betas.append("thinking-binding-controls-2026-08-01")
                         payload_for_stream["betas"] = _betas
                         continue
+                    # An org admin can switch web fetch off in the Claude Console;
+                    # every request that still carries the tool then 400s ("web
+                    # fetch is not enabled"). Drop the tool and answer without it.
+                    # ponytail: retried per turn, not remembered; one unbilled 400
+                    # per turn while the WEB_FETCH valve stays on.
+                    _err = str(e).lower()
+                    _tools = payload_for_stream.get("tools") or []
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "not enabled" in _err
+                        and ("web fetch" in _err or "web_fetch" in _err)
+                        and any(t.get("name") == "web_fetch" for t in _tools)
+                    ):
+                        logger.warning(f"[WEB-FETCH] disabled for this organization, retrying without it: {e}")
+                        payload_for_stream["tools"] = [t for t in _tools if t.get("name") != "web_fetch"]
+                        if not payload_for_stream["tools"]:
+                            payload_for_stream.pop("tools")
+                            payload_for_stream.pop("tool_choice", None)
+                        await status.notification(
+                            "Web fetch is turned off for this Anthropic organization - "
+                            "answering without it. Turn off the WEB_FETCH valve to skip this retry.",
+                            type="warning",
+                        )
+                        continue
                     # Fast mode rate-limited (or not enabled for the org, limit 0):
                     # retry at standard speed as the fast-mode docs recommend. The
                     # rest of this turn's tool loop stays on standard speed; the

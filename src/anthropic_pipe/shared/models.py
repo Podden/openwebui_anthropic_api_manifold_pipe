@@ -18,6 +18,7 @@ class PipeModelSupportMethods:
         thinking_types = getattr(thinking, "types", None) if thinking else None
         effort = getattr(caps, "effort", None) if caps else None
         ctx_mgmt = getattr(caps, "context_management", None) if caps else None
+        server_tools = getattr(caps, "server_tools", None) if caps else None
 
         max_tokens = getattr(model, "max_tokens", 0) or 0
         max_input = getattr(model, "max_input_tokens", 0) or 0
@@ -34,6 +35,10 @@ class PipeModelSupportMethods:
             "supports_programmatic_calling": _sup(getattr(caps, "code_execution", None)) if caps else False,
             "supports_compaction": _sup(getattr(ctx_mgmt, "compact_20260112", None)) if ctx_mgmt else False,
             "supports_structured_outputs": _sup(getattr(caps, "structured_outputs", None)) if caps else False,
+            # Server tools default to available: endpoints that predate the
+            # field (proxies, older API versions) keep sending the tools.
+            "supports_web_search_tool": _sup(getattr(server_tools, "web_search", None)) if server_tools else True,
+            "supports_code_execution_tool": _sup(getattr(server_tools, "code_execution", None)) if server_tools else True,
             # All Claude 4+ models support memory
             "supports_memory": True,
             # Defaults for fields not in API — overridden by MODEL_CAPABILITY_OVERRIDES
@@ -45,6 +50,15 @@ class PipeModelSupportMethods:
             # server-side refusal fallback; pinned False by identity (Haiku 5.5)
             "supports_refusal_fallback": True,
         }
+        # How a thinking-on-by-default model turns thinking off: "disabled"
+        # where the API accepts it, else "between_tools" (no up-front
+        # thinking). Only read when thinking_on_by_default is pinned below.
+        if (
+            thinking_types
+            and _sup(getattr(thinking_types, "between_tools", None))
+            and not _sup(getattr(thinking_types, "disabled", None))
+        ):
+            info["thinking_off_type"] = "between_tools"
 
         # Apply model-specific overrides for fields not available from API
         model_id = model.id if hasattr(model, "id") else ""
@@ -272,14 +286,18 @@ class PipeModelSupportMethods:
         # create_request_payload. Plaintext keys pass through untouched.
         api_key = decrypt_valve_secret(api_key)
         base_url = self.valves.ANTHROPIC_BASE_URL.strip() or None
-        # The SDK derives its own "X-Api-Key" from api_key and merges default_headers
-        # with a case-sensitive dict merge, so a lowercase "x-api-key" here survives
-        # alongside it and httpx emits the header twice -> 401 "API key is invalid.".
+        # SDK 2.x sends api_key as "Authorization: Bearer" only. Proxies and
+        # gateways behind a custom ANTHROPIC_BASE_URL often still read
+        # "x-api-key", so those endpoints get the key in both headers (the Claude
+        # API accepts the pair, verified 2026-10-23). A caller's own x-api-key
+        # entry may still be encrypted, hence dropped in favour of api_key.
         headers = {
             k: v
             for k, v in (default_headers or {}).items()
             if k.lower() != "x-api-key"
         }
+        if base_url and base_url.rstrip("/") != self._DEFAULT_API_BASE:
+            headers["x-api-key"] = api_key
         ws_id = (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip()
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)

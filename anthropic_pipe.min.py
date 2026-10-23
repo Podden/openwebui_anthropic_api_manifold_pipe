@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.39
+version: 0.10.0
 license: MIT
-requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -37,6 +37,14 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.0
+- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
+- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
+- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
+- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
+- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
+- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
+
 v0.9.39
 - Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on.
 - Prompt cache kept for tool calls with two or more arguments (e.g. tool search's query + limit): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: messages_changed).
@@ -48,10 +56,6 @@ v0.9.39
 v0.9.38
 - Estimated USD cost per turn (new SHOW_COST user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the SHOW_TOKEN_COUNT status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
 - The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
-
-v0.9.37
-- Removed the beta headers of features Anthropic made generally available (effort, code execution 20250825, web fetch 20250910, tool search / programmatic tool calling, prompt caching); verified live without them.
-- Removed context editing (CONTEXT_EDITING_* user valves): off by default and it invalidated the prompt cache whenever it cleared. Compaction stays.
 
 """
 
@@ -596,14 +600,6 @@ async def create_request_payload(
         "metadata": body.get("metadata", {}),
     }
 
-    _strip_sampling = bool(model_info.get("supports_adaptive_thinking"))
-    if not _strip_sampling and body.get("temperature") is not None:
-        payload["temperature"] = float(body.get("temperature", 0))
-    if not _strip_sampling and body.get("top_k") is not None:
-        payload["top_k"] = float(body.get("top_k", 0))
-    if not _strip_sampling and body.get("top_p") is not None:
-        payload["top_p"] = float(body.get("top_p", 0))
-
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
@@ -875,7 +871,9 @@ async def create_request_payload(
         and model_info.get("supports_programmatic_calling", False)
     )
 
-    if activate_code_execution and not has_code_execution and not has_native_terminal_tools:
+    if activate_code_execution and not model_info.get("supports_code_execution_tool", True):
+        logger.warning(f"Code execution skipped: /v1/models reports no code execution tool for {actual_model_name}")
+    elif activate_code_execution and not has_code_execution and not has_native_terminal_tools:
         if use_programmatic_code_exec:
 
             code_exec_type = "code_execution_20260120"
@@ -980,7 +978,7 @@ async def create_request_payload(
     if model_info["supports_effort"] and effort_config:
         payload["output_config"] = effort_config
 
-    if payload.get("speed") == "fast":
+    if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
 
     if (payload.get("thinking") or {}).get("display") == "updates":
@@ -2772,7 +2770,7 @@ class ModelPricing:
         return f"${cost:.4f}"
 
 class Pipe:
-    API_VERSION = "2023-06-01"
+    API_VERSION = "2026-10-21"
     _DEFAULT_API_BASE = "https://api.anthropic.com"
 
     MODEL_MAX_TOKENS_FALLBACK = {
@@ -2868,6 +2866,8 @@ class Pipe:
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -2913,6 +2913,7 @@ class Pipe:
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -4670,6 +4671,11 @@ class Pipe:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+        if web_search_enabled and not self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            logger.warning(f"Web search skipped: /v1/models reports no web search tool for {actual_model_name}")
+            web_search_enabled = False
         if web_search_enabled:
 
             city = (
@@ -6363,6 +6369,7 @@ class Pipe:
         thinking_types = getattr(thinking, "types", None) if thinking else None
         effort = getattr(caps, "effort", None) if caps else None
         ctx_mgmt = getattr(caps, "context_management", None) if caps else None
+        server_tools = getattr(caps, "server_tools", None) if caps else None
 
         max_tokens = getattr(model, "max_tokens", 0) or 0
         max_input = getattr(model, "max_input_tokens", 0) or 0
@@ -6380,6 +6387,9 @@ class Pipe:
             "supports_compaction": _sup(getattr(ctx_mgmt, "compact_20260112", None)) if ctx_mgmt else False,
             "supports_structured_outputs": _sup(getattr(caps, "structured_outputs", None)) if caps else False,
 
+            "supports_web_search_tool": _sup(getattr(server_tools, "web_search", None)) if server_tools else True,
+            "supports_code_execution_tool": _sup(getattr(server_tools, "code_execution", None)) if server_tools else True,
+
             "supports_memory": True,
 
             "supports_dynamic_filtering": False,
@@ -6390,6 +6400,13 @@ class Pipe:
 
             "supports_refusal_fallback": True,
         }
+
+        if (
+            thinking_types
+            and _sup(getattr(thinking_types, "between_tools", None))
+            and not _sup(getattr(thinking_types, "disabled", None))
+        ):
+            info["thinking_off_type"] = "between_tools"
 
         model_id = model.id if hasattr(model, "id") else ""
         overrides = cls.MODEL_CAPABILITY_OVERRIDES.get(model_id, {})
@@ -6557,6 +6574,8 @@ class Pipe:
             for k, v in (default_headers or {}).items()
             if k.lower() != "x-api-key"
         }
+        if base_url and base_url.rstrip("/") != self._DEFAULT_API_BASE:
+            headers["x-api-key"] = api_key
         ws_id = (getattr(self.valves, "ANTHROPIC_WORKSPACE_ID", "") or "").strip()
         if ws_id:
             headers.setdefault("anthropic-workspace-id", ws_id)
@@ -8217,6 +8236,26 @@ class Pipe:
                         if "thinking-binding-controls-2026-08-01" not in _betas:
                             _betas.append("thinking-binding-controls-2026-08-01")
                         payload_for_stream["betas"] = _betas
+                        continue
+
+                    _err = str(e).lower()
+                    _tools = payload_for_stream.get("tools") or []
+                    if (
+                        isinstance(e, BadRequestError)
+                        and "not enabled" in _err
+                        and ("web fetch" in _err or "web_fetch" in _err)
+                        and any(t.get("name") == "web_fetch" for t in _tools)
+                    ):
+                        logger.warning(f"[WEB-FETCH] disabled for this organization, retrying without it: {e}")
+                        payload_for_stream["tools"] = [t for t in _tools if t.get("name") != "web_fetch"]
+                        if not payload_for_stream["tools"]:
+                            payload_for_stream.pop("tools")
+                            payload_for_stream.pop("tool_choice", None)
+                        await status.notification(
+                            "Web fetch is turned off for this Anthropic organization - "
+                            "answering without it. Turn off the WEB_FETCH valve to skip this retry.",
+                            type="warning",
+                        )
                         continue
 
                     if isinstance(e, RateLimitError) and payload_for_stream.get("speed") == "fast":

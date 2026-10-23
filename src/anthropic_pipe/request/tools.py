@@ -157,6 +157,11 @@ class PipeRequestToolsMethods:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+        if web_search_enabled and not self.get_model_info(actual_model_name).get(
+            "supports_web_search_tool", True
+        ):
+            logger.warning(f"Web search skipped: /v1/models reports no web search tool for {actual_model_name}")
+            web_search_enabled = False
         if web_search_enabled:
             # Get user location values with fallback to global valves
             city = (

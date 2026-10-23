@@ -38,18 +38,9 @@ async def create_request_payload(
         "stream": body.get("stream", True),
         "metadata": body.get("metadata", {}),
     }
-    # Opus 4.7 / 4.8 and the 4.6+ adaptive-thinking family reject sampling params
-    # (temperature / top_p / top_k) — API returns 400. Strip them there.
-    # Heuristic: models that support adaptive thinking (Opus 4.6, Sonnet 4.6,
-    # Opus 4.7, Opus 4.8) do not accept these fields when adaptive is enabled.
-    # On Opus 4.7 / 4.8 they are rejected unconditionally. Safe to skip for the set.
-    _strip_sampling = bool(model_info.get("supports_adaptive_thinking"))
-    if not _strip_sampling and body.get("temperature") is not None:
-        payload["temperature"] = float(body.get("temperature", 0))
-    if not _strip_sampling and body.get("top_k") is not None:
-        payload["top_k"] = float(body.get("top_k", 0))
-    if not _strip_sampling and body.get("top_p") is not None:
-        payload["top_p"] = float(body.get("top_p", 0))
+    # temperature / top_p / top_k from OpenWebUI's model params are dropped on
+    # purpose: API version 2026-10-21 answers them with a 400 on every model,
+    # and anthropic SDK 2.x no longer accepts them as arguments.
 
     # Add data residency if set to US (1.1x token cost)
     if pipe.valves.DATA_RESIDENCY == "us":
@@ -390,7 +381,9 @@ async def create_request_payload(
         and model_info.get("supports_programmatic_calling", False)
     )
 
-    if activate_code_execution and not has_code_execution and not has_native_terminal_tools:
+    if activate_code_execution and not model_info.get("supports_code_execution_tool", True):
+        logger.warning(f"Code execution skipped: /v1/models reports no code execution tool for {actual_model_name}")
+    elif activate_code_execution and not has_code_execution and not has_native_terminal_tools:
         if use_programmatic_code_exec:
             # Always add code_execution_20260120 for programmatic calling,
             # even alongside dynamic filtering tools (it supersedes the auto-injected one)
@@ -514,8 +507,9 @@ async def create_request_payload(
     # Add Fast Mode beta header whenever the request actually asks for fast
     # speed. Bind to payload["speed"] -- set above from the valve OR the
     # per-message toggle and already gated on supports_fast_mode -- so the
-    # opt-in header follows the toggle, not just the admin valve.
-    if payload.get("speed") == "fast":
+    # opt-in header follows the toggle, not just the admin valve. Only the
+    # research-preview models (Opus 5, Opus 4.8) need it; Opus 5.5 is GA.
+    if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
 
     if (payload.get("thinking") or {}).get("display") == "updates":

@@ -6,10 +6,11 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.9.39`
+- **Current pipe version:** `0.10.0`
 - **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
-- **Requirements:** `pydantic>=2.0.0`, `anthropic>=0.121.0`, `pillow-heif>=0.18.0`
+- **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
+- **Anthropic API version:** `2026-10-21`
 - **Model list and capabilities are fetched dynamically** from Anthropic's Models API (`max_input_tokens`, `max_tokens`, thinking/effort support, compaction support, etc.)
 - **Current Anthropic model docs focus on:** `Claude Fable 5.1`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, `Claude Haiku 5.5`
 
@@ -233,6 +234,14 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.10.0`
+- API version `2026-10-21` and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe)
+- `temperature` / `top_p` / `top_k` from model params are no longer sent. `2026-10-21` rejects them on every model, and with SDK 1.9+ they already failed with a `TypeError` on Haiku 4.5, Sonnet 4.5 and Opus 4.5
+- SDK 2.x authenticates with `Authorization: Bearer`. A custom `ANTHROPIC_BASE_URL` (proxy, gateway) also gets the key as `x-api-key`, so gateways that read only that header keep working
+- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it
+- `/v1/models`: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (`disabled` or `between_tools`)
+- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400
+
 ### `v0.9.39`
 - Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on
 - Prompt cache kept for tool calls with two or more arguments (e.g. tool search's `query` + `limit`): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: `messages_changed`)

@@ -87,9 +87,10 @@ class FakePipe:
 
     API_VERSION = "2026-01-01"
 
-    def __init__(self, valves: FakeValves, supports_fast_mode: bool):
+    def __init__(self, valves: FakeValves, supports_fast_mode: bool, fast_mode_beta: bool):
         self.valves = valves
         self._supports_fast_mode = supports_fast_mode
+        self._fast_mode_beta = fast_mode_beta
 
     def get_model_info(self, actual_model_name: str) -> Dict[str, Any]:
         return {
@@ -97,6 +98,8 @@ class FakePipe:
             "supports_effort": False,
             "supports_thinking": False,
             "supports_fast_mode": self._supports_fast_mode,
+            # True for the research-preview models (Opus 5, Opus 4.8); Opus 5.5 is GA.
+            "fast_mode_beta": self._fast_mode_beta,
         }
 
     def _convert_messages_to_claude_format(self, raw_messages):
@@ -124,9 +127,10 @@ def build_pipe(
     *,
     enable_fast_mode_valve: bool,
     supports_fast_mode: bool,
+    fast_mode_beta: bool = True,
 ) -> FakePipe:
     valves = FakeValves(ENABLE_FAST_MODE=enable_fast_mode_valve)
-    return FakePipe(valves, supports_fast_mode)
+    return FakePipe(valves, supports_fast_mode, fast_mode_beta)
 
 
 async def _call(
@@ -186,6 +190,21 @@ async def test_admin_valve_alone_still_sends_beta_header(module):
     beta_header = headers.get("anthropic-beta", "")
     assert "fast-mode-2026-02-01" in beta_header.split(","), (
         f"admin-valve fast mode must send the fast-mode beta header, got anthropic-beta={beta_header!r}"
+    )
+
+
+async def test_ga_fast_mode_model_omits_beta_header(module):
+    """Opus 5.5: fast mode is GA, so speed=fast goes out without the beta header."""
+    pipe = build_pipe(
+        module, enable_fast_mode_valve=True, supports_fast_mode=True, fast_mode_beta=False
+    )
+    payload, headers, _marker_metadata, _api_tool_names = await _call(module, pipe)
+    assert payload.get("speed") == "fast", (
+        f"expected payload['speed'] == 'fast', got {payload.get('speed')!r}"
+    )
+    beta_header = headers.get("anthropic-beta", "")
+    assert "fast-mode-2026-02-01" not in beta_header.split(","), (
+        f"GA fast mode must not send the beta header, got anthropic-beta={beta_header!r}"
     )
 
 

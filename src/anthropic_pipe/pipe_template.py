@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.9.39
+version: 0.10.0
 license: MIT
-requirements: pydantic>=2.0.0, anthropic>=0.121.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -37,6 +37,14 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.0
+- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
+- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
+- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
+- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
+- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
+- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
+
 v0.9.39
 - Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on.
 - Prompt cache kept for tool calls with two or more arguments (e.g. tool search's query + limit): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: messages_changed).
@@ -48,10 +56,6 @@ v0.9.39
 v0.9.38
 - Estimated USD cost per turn (new SHOW_COST user valve, contributed by Willian-Zhang in #49): `cost_usd` plus a per-component `cost_breakdown_usd` in the message usage (message info tooltip, persisted for analytics) and appended to the SHOW_TOKEN_COUNT status line. Prices come from a built-in list-price table (verified 2026-10-13); admins patch it via the MODEL_PRICING_OVERRIDES valve (JSON, USD per MTok)
 - The estimate follows the bill: cache writes split 5m/1h, fast mode, Haiku 5.5's prompt-length tier and US data residency priced per API call from the response usage, web searches at $10 per 1,000
-
-v0.9.37
-- Removed the beta headers of features Anthropic made generally available (effort, code execution 20250825, web fetch 20250910, tool search / programmatic tool calling, prompt caching); verified live without them.
-- Removed context editing (CONTEXT_EDITING_* user valves): off by default and it invalidated the prompt cache whenever it cleared. Compaction stays.
 
 """
 
@@ -750,7 +754,7 @@ class PipeRequestContext:
 
 
 class Pipe:
-    API_VERSION = "2023-06-01"  # Current API version as of May 2025
+    API_VERSION = "2026-10-21"  # also the default of anthropic SDK 2.x
     _DEFAULT_API_BASE = "https://api.anthropic.com"
 
     # Capability overrides for fields NOT available from the /v1/models API.
@@ -810,9 +814,8 @@ class Pipe:
     # advertise it: get_model_info's static fallback has to default it to False,
     # and endpoints that serve no capability metadata (Azure and other proxies,
     # or ids named manually via ENABLED_MODELS) never overwrite that. The pipe
-    # then sends explicit `budget_tokens` thinking plus temperature/top_p to a
-    # model that wants `thinking:{"type":"adaptive"}` and no sampling params --
-    # which the API rejects. Pinning it per identity makes those endpoints
+    # then sends explicit `budget_tokens` thinking to a model that wants
+    # `thinking:{"type":"adaptive"}` -- which the API rejects. Pinning it per identity makes those endpoints
     # behave like the direct one.
     MODEL_CAPABILITY_OVERRIDES = {
         # Fable 5.1 / Mythos 5.1 reject tool_choice "tool" and "any" with a 400
@@ -881,6 +884,8 @@ class Pipe:
         "claude-opus-5": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+            # Fast mode still a research preview here (GA only on Opus 5.5).
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -930,6 +935,7 @@ class Pipe:
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
             "supports_fast_mode": True,
+            "fast_mode_beta": True,
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
