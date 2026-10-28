@@ -94,10 +94,8 @@ class PipeRequestMessagesMethods:
 
                     if extracted_memories:
                         logger.debug(
-                            f"✓ Extracted User Context: {extracted_memories[:100]}..."
-                        )
-                        logger.debug(
-                            f"✓ System prompt after removal (last 200 chars): ...{cleaned_text[-200:]}"
+                            f"✓ Extracted User Context: {len(extracted_memories)}c, "
+                            f"system prompt now {len(cleaned_text)}c"
                         )
 
                     # Update block with cleaned text
@@ -775,7 +773,7 @@ class PipeRequestMessagesMethods:
                 except (json.JSONDecodeError, ValueError):
                     logger.warning(
                         f"Failed to parse tool_use arguments for "
-                        f"{tc_name!r}: {tc_args_raw[:120]!r}"
+                        f"{tc_name!r} ({len(tc_args_raw)}c)"
                     )
                     tc_input = {}
                 current_assistant.append({

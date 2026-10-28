@@ -209,7 +209,7 @@ class PipeTaskSupportMethods:
             # Join without adding line breaks - preserve original formatting
             result = "".join(text_parts).strip()
 
-            logger.debug(f"Task response: {result}")
+            logger.debug(f"Task response: {len(result)}c")
 
             return result
 

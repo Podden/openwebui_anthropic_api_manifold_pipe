@@ -1,7 +1,10 @@
 """Compiled Pipe method group extracted from pipe_template.py."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -93,39 +96,46 @@ class PipeCacheControlMethods:
 
         return _walk(node)
 
-    @staticmethod
-    def _strip_payload(payload: dict, max_str: int = 20) -> dict:
-        """Return a copy of the outgoing Anthropic payload with *minimal*
-        structural changes, safe for debug logging.
+    # Keys whose string values describe structure, not content; everything else
+    # inside messages/system/metadata is redacted before it reaches a log line.
+    _LOG_STRUCTURAL_KEYS = frozenset({
+        "type", "role", "id", "tool_use_id", "name", "media_type", "file_id",
+        "ttl", "container_id",
+    })
+    # Per-process salt: digests stay comparable across turns of one process
+    # but cannot be reversed by hashing guesses (names, "yes", short replies).
+    _LOG_SALT = os.urandom(16)
 
-        Only two things change:
+    @classmethod
+    def _log_redact(cls, value) -> str:
+        """Length + salted digest of a value, for logs that must not carry content."""
+        s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        digest = hashlib.sha1(cls._LOG_SALT + s.encode("utf-8", "replace")).hexdigest()[:8]
+        return f"‹{len(s)}c#{digest}›"
+
+    def _strip_payload(self, payload: dict) -> dict:
+        """Return a copy of the outgoing Anthropic payload that is safe for
+        debug logging: no conversation content, no personal data.
+
           1. ``tools`` is replaced with a small summary (count + names +
              indices carrying cache_control).
-          2. Every string value reachable inside ``messages`` is truncated to
-             ``max_str`` chars + ``…[Nc]`` length marker.
+          2. Inside ``messages``, ``system`` and ``metadata`` every string is
+             replaced by ``‹Nc#hash›`` (length + salted digest), except the
+             structural keys in ``_LOG_STRUCTURAL_KEYS`` (type, role, ids, …).
 
-        Everything else — key order, whitespace inside non-messages strings,
-        `system`, `cache_control`, booleans, numbers, None values, extra
-        top-level fields — is left **byte-for-byte** untouched so that two
-        consecutive dumps can be diffed to locate cache-invalidating drift
-        (double newlines, missing spaces, re-ordered keys, etc).
+        Key order, block layout, ``cache_control``, numbers and the remaining
+        top-level fields stay untouched, and equal strings give equal digests
+        within one process, so two consecutive dumps still locate
+        cache-invalidating drift without revealing what changed.
         """
-        def _clip(s):
-            """Truncate a string to max_str chars, appending a length+hash marker."""
-            if isinstance(s, str) and len(s) > max_str:
-                import hashlib as _hl
-                _h = _hl.sha1(s.encode("utf-8", "replace")).hexdigest()[:8]
-                return f"{s[:max_str]}…[{len(s)}c#{_h}]"
-            return s
-
-        def _walk(node):
-            """Recursively clip every string value found within a dict/list structure."""
+        def _walk(node, key=None):
+            """Recursively redact content strings, keeping structural ones."""
             if isinstance(node, dict):
-                return {k: _walk(v) for k, v in node.items()}
+                return {k: _walk(v, k) for k, v in node.items()}
             if isinstance(node, list):
-                return [_walk(v) for v in node]
-            if isinstance(node, str):
-                return _clip(node)
+                return [_walk(v, key) for v in node]
+            if isinstance(node, str) and key not in self._LOG_STRUCTURAL_KEYS:
+                return self._log_redact(node)
             return node
 
         stripped: dict = {}
@@ -162,8 +172,8 @@ class PipeCacheControlMethods:
                         if isinstance(t, dict) and t.get("defer_loading")
                     ],
                 }
-            elif k == "messages":
-                stripped["messages"] = _walk(v)
+            elif k in ("messages", "system", "metadata"):
+                stripped[k] = _walk(v)
             else:
                 stripped[k] = v
         return stripped
@@ -194,13 +204,12 @@ class PipeCacheControlMethods:
                     return [_strip_cache_control(v) for v in obj]
                 return obj
 
-            def _preview(canon: str, limit: int = 6000) -> str:
-                """Return canon as-is if short, else a truncated preview with a trailing sha1 digest."""
-                if len(canon) <= limit:
-                    return canon
-                import hashlib
-                digest = hashlib.sha1(canon.encode("utf-8", "replace")).hexdigest()[:10]
-                return f"{canon[:limit]}...(truncated {len(canon)}c sha1={digest})"
+            def _preview(m: dict, limit: int = 6000) -> str:
+                """Block layout of a message with every content string redacted,
+                so PREV/NOW lines show which block drifted, never what it says."""
+                redacted = json.dumps(self._strip_payload({"messages": [m]})["messages"][0],
+                                      ensure_ascii=False, separators=(",", ":"), default=str)
+                return redacted if len(redacted) <= limit else f"{redacted[:limit]}...(truncated {len(redacted)}c)"
 
             def _hash_msg(m: dict) -> tuple[str, str, str]:
                 """Return (insertion_order_hash, sorted_hash, preview). The SDK sends
@@ -228,7 +237,7 @@ class PipeCacheControlMethods:
                     canon_sorted = repr(stripped)
                 ins_h = hashlib.sha1(canon_ins.encode("utf-8")).hexdigest()[:10]
                 sort_h = hashlib.sha1(canon_sorted.encode("utf-8")).hexdigest()[:10]
-                return (ins_h, sort_h, _preview(canon_ins))
+                return (ins_h, sort_h, _preview(stripped))
 
             def _summarize(m: dict) -> str:
                 """Build a short human-readable summary of a message's role and content blocks."""
@@ -393,7 +402,7 @@ class PipeCacheControlMethods:
                         logger.warning(
                             f"  {marker} msg[{i}]: ins prev={pi} now={ni} | sort prev={ps} now={ns} {sm}"
                         )
-                    # Dump FULL JSON (insertion order) for diffing
+                    # Block layout with redacted strings: shows which block drifted
                     if ins_first_diff < len(prev_previews):
                         logger.warning(
                             f"  ** msg[{ins_first_diff}] PREV-INS-ORDER: "

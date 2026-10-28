@@ -490,7 +490,7 @@ class PipeStreamRuntimeSupportMethods:
                 logger.debug(f"No citation data found in event")
                 return
 
-            logger.debug(f" Citation data found: {citation}")
+            logger.debug(f" Citation data found: {getattr(citation, 'type', None) or (citation.get('type') if isinstance(citation, dict) else '?')}")
 
             # Only handle web search result citations
             citation_type = getattr(citation, "type", "")

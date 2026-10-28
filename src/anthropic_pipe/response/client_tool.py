@@ -96,8 +96,8 @@ async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use.input_buffer = ""
     if initial_input:
         logger.debug(
-            "🔧 Tool input pre-populated at start: %s",
-            json.dumps(initial_input, ensure_ascii=False)[:200],
+            "🔧 Tool input pre-populated at start: %d key(s)",
+            len(initial_input),
         )
         tool_use.tools_buffer = json.dumps(
             {
@@ -169,17 +169,17 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
 
     try:
         json.loads(tools_buffer)
-        logger.debug(" tools_buffer already valid JSON: %s", tools_buffer)
+        logger.debug(" tools_buffer already valid JSON (%dc)", len(tools_buffer))
     except json.JSONDecodeError:
         if tools_buffer.rstrip().endswith('"input":') or tools_buffer.rstrip().endswith(
             '"input": '
         ):
             tools_buffer += " {}"
-            logger.debug(" Added empty input object: %s", tools_buffer)
+            logger.debug(" Added empty input object")
         tools_buffer += "}"
-        logger.debug(" Closed tools_buffer in content_block_stop: %s", tools_buffer)
+        logger.debug(" Closed tools_buffer in content_block_stop")
 
-    logger.debug("Parsed tool call: %s", tools_buffer)
+    logger.debug("Parsed tool call (%dc)", len(tools_buffer))
 
     try:
         tool_call_data = json.loads(tools_buffer)

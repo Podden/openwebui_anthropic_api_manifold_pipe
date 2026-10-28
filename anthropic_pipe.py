@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.1
+version: 0.10.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,11 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.2
+- Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
+- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
+- The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
+
 v0.10.1
 - OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
 - ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
@@ -48,14 +53,6 @@ v0.10.0
 - Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
 - /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
 - Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
-
-v0.9.39
-- Prompt cache kept across tool calls: the tool loop now sends a tool result in the same form the next turn replays it (JSON compacted, plain text unquoted). Before, every turn after a tool call lost the cache from the first tool result on.
-- Prompt cache kept for tool calls with two or more arguments (e.g. tool search's query + limit): replay no longer re-sorts the model's `input` keys, which the API renders into the prompt (cache diagnostics: messages_changed).
-- A server tool the model calls right after a client tool in the same response (e.g. bash after view_knowledge_file) stays in that assistant message on replay instead of moving into the next one.
-- Tool search: the system hint now names the deferred tools (sorted, changes only with the tool set). Without the names the model answered "use the weather tool" with web search instead of searching for the deferred tool.
-- Open Terminal plus code execution in one request: a system hint tells the model that only the terminal tools reach the user's terminal. Asked to run a command in the terminal, it used Anthropic's isolated code execution sandbox instead.
-- CACHE-DIFF debug log no longer reports block key-order differences as breaks; the API ignores them (measured), only tool `input` order counts. The [PAYLOAD] log line lists deferred tools.
 
 """
 
@@ -95,6 +92,9 @@ from typing import Literal
 from fastapi import Request
 
 logger = logging.getLogger(__name__)
+# The SDK dumps every request body (messages, system prompt, metadata) at DEBUG;
+# under GLOBAL_LOG_LEVEL=DEBUG that puts chat content into the server log.
+logging.getLogger("anthropic").setLevel(logging.INFO)
 
 # =============================================================================
 # COMPILED REGEX PATTERNS
@@ -2115,8 +2115,8 @@ async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use.input_buffer = ""
     if initial_input:
         logger.debug(
-            "🔧 Tool input pre-populated at start: %s",
-            json.dumps(initial_input, ensure_ascii=False)[:200],
+            "🔧 Tool input pre-populated at start: %d key(s)",
+            len(initial_input),
         )
         tool_use.tools_buffer = json.dumps(
             {
@@ -2186,17 +2186,17 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
 
     try:
         json.loads(tools_buffer)
-        logger.debug(" tools_buffer already valid JSON: %s", tools_buffer)
+        logger.debug(" tools_buffer already valid JSON (%dc)", len(tools_buffer))
     except json.JSONDecodeError:
         if tools_buffer.rstrip().endswith('"input":') or tools_buffer.rstrip().endswith(
             '"input": '
         ):
             tools_buffer += " {}"
-            logger.debug(" Added empty input object: %s", tools_buffer)
+            logger.debug(" Added empty input object")
         tools_buffer += "}"
-        logger.debug(" Closed tools_buffer in content_block_stop: %s", tools_buffer)
+        logger.debug(" Closed tools_buffer in content_block_stop")
 
-    logger.debug("Parsed tool call: %s", tools_buffer)
+    logger.debug("Parsed tool call (%dc)", len(tools_buffer))
 
     try:
         tool_call_data = json.loads(tools_buffer)
@@ -2450,7 +2450,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
             # absorbs the repeats as the remaining deltas re-parse the same JSON.
             await ctx.status.searching_web(query)
             if query != ctx.state.text.current_search_query:
-                logger.debug("Web search query complete: '%s'", query)
+                logger.debug("Web search query complete (%dc)", len(query))
                 ctx.state.text.current_search_query = query
 
     elif tool_name == "web_fetch":
@@ -2468,7 +2468,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
     elif tool_name == "bash_code_execution":
         if "command" in parsed:
             server_tool.bash_command = parsed["command"]
-            logger.debug("Bash execution command: %s...", server_tool.bash_command[:100])
+            logger.debug("Bash execution command (%dc)", len(server_tool.bash_command))
             if _shows_code_preview(server_tool):
                 await _stream_code_preview(ctx, parsed["command"], "bash")
 
@@ -2495,7 +2495,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
 
     elif tool_name in ("tool_search_tool_regex", "tool_search_tool_bm25"):
         if "query" in parsed:
-            logger.debug("Tool search query: '%s'", parsed["query"])
+            logger.debug("Tool search query (%dc)", len(str(parsed["query"])))
             await ctx.status.searching_tools(parsed["query"])
 
 
@@ -2598,7 +2598,7 @@ async def _download_links_for(files_output: Any, ctx: Any) -> list[str]:
 
 async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
     server_tool = ctx.state.server_tool
-    logger.debug("Processing bash_code_execution_tool_result: %s", content_block)
+    logger.debug("Processing bash_code_execution_tool_result")
     await ctx.pipe._persist_server_tool_result(
         content_block,
         "bash_code_execution_tool_result",
@@ -2645,7 +2645,7 @@ async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
 
 async def _handle_text_editor_result(content_block: Any, ctx: Any) -> None:
     server_tool = ctx.state.server_tool
-    logger.debug("Processing text_editor_code_execution_tool_result: %s", content_block)
+    logger.debug("Processing text_editor_code_execution_tool_result")
     await ctx.pipe._persist_server_tool_result(
         content_block,
         "text_editor_code_execution_tool_result",
@@ -2793,7 +2793,7 @@ async def handle_web_tool_result_block_start(
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     if content_type == "web_search_tool_result":
-        logger.debug(" Processing web search result event: %s", content_block)
+        logger.debug(" Processing web search result event")
         content_items = getattr(content_block, "content", None)
         tool_use_id = getattr(content_block, "tool_use_id", "") or ""
         error_code = None
@@ -2951,7 +2951,7 @@ async def handle_advisor_result_block_start(content_block: Any, ctx: Any) -> Non
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     emit_delta = ctx.emit_delta
-    logger.debug(" Processing advisor result event: %s", content_block)
+    logger.debug(" Processing advisor result event")
     tool_use_id = getattr(content_block, "tool_use_id", "") or ""
     content = getattr(content_block, "content", None)
     inner_type = (
@@ -3015,7 +3015,7 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     emit_delta = ctx.emit_delta
-    logger.debug(" Processing tool search result event: %s", content_block)
+    logger.debug(" Processing tool search result event")
     tool_use_id = getattr(content_block, "tool_use_id", "") or ""
     content_obj = getattr(content_block, "content", None)
     tool_references = []
@@ -4045,39 +4045,46 @@ class Pipe:
 
         return _walk(node)
 
-    @staticmethod
-    def _strip_payload(payload: dict, max_str: int = 20) -> dict:
-        """Return a copy of the outgoing Anthropic payload with *minimal*
-        structural changes, safe for debug logging.
+    # Keys whose string values describe structure, not content; everything else
+    # inside messages/system/metadata is redacted before it reaches a log line.
+    _LOG_STRUCTURAL_KEYS = frozenset({
+        "type", "role", "id", "tool_use_id", "name", "media_type", "file_id",
+        "ttl", "container_id",
+    })
+    # Per-process salt: digests stay comparable across turns of one process
+    # but cannot be reversed by hashing guesses (names, "yes", short replies).
+    _LOG_SALT = os.urandom(16)
 
-        Only two things change:
+    @classmethod
+    def _log_redact(cls, value) -> str:
+        """Length + salted digest of a value, for logs that must not carry content."""
+        s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        digest = hashlib.sha1(cls._LOG_SALT + s.encode("utf-8", "replace")).hexdigest()[:8]
+        return f"‹{len(s)}c#{digest}›"
+
+    def _strip_payload(self, payload: dict) -> dict:
+        """Return a copy of the outgoing Anthropic payload that is safe for
+        debug logging: no conversation content, no personal data.
+
           1. ``tools`` is replaced with a small summary (count + names +
              indices carrying cache_control).
-          2. Every string value reachable inside ``messages`` is truncated to
-             ``max_str`` chars + ``…[Nc]`` length marker.
+          2. Inside ``messages``, ``system`` and ``metadata`` every string is
+             replaced by ``‹Nc#hash›`` (length + salted digest), except the
+             structural keys in ``_LOG_STRUCTURAL_KEYS`` (type, role, ids, …).
 
-        Everything else — key order, whitespace inside non-messages strings,
-        `system`, `cache_control`, booleans, numbers, None values, extra
-        top-level fields — is left **byte-for-byte** untouched so that two
-        consecutive dumps can be diffed to locate cache-invalidating drift
-        (double newlines, missing spaces, re-ordered keys, etc).
+        Key order, block layout, ``cache_control``, numbers and the remaining
+        top-level fields stay untouched, and equal strings give equal digests
+        within one process, so two consecutive dumps still locate
+        cache-invalidating drift without revealing what changed.
         """
-        def _clip(s):
-            """Truncate a string to max_str chars, appending a length+hash marker."""
-            if isinstance(s, str) and len(s) > max_str:
-                import hashlib as _hl
-                _h = _hl.sha1(s.encode("utf-8", "replace")).hexdigest()[:8]
-                return f"{s[:max_str]}…[{len(s)}c#{_h}]"
-            return s
-
-        def _walk(node):
-            """Recursively clip every string value found within a dict/list structure."""
+        def _walk(node, key=None):
+            """Recursively redact content strings, keeping structural ones."""
             if isinstance(node, dict):
-                return {k: _walk(v) for k, v in node.items()}
+                return {k: _walk(v, k) for k, v in node.items()}
             if isinstance(node, list):
-                return [_walk(v) for v in node]
-            if isinstance(node, str):
-                return _clip(node)
+                return [_walk(v, key) for v in node]
+            if isinstance(node, str) and key not in self._LOG_STRUCTURAL_KEYS:
+                return self._log_redact(node)
             return node
 
         stripped: dict = {}
@@ -4114,8 +4121,8 @@ class Pipe:
                         if isinstance(t, dict) and t.get("defer_loading")
                     ],
                 }
-            elif k == "messages":
-                stripped["messages"] = _walk(v)
+            elif k in ("messages", "system", "metadata"):
+                stripped[k] = _walk(v)
             else:
                 stripped[k] = v
         return stripped
@@ -4146,13 +4153,12 @@ class Pipe:
                     return [_strip_cache_control(v) for v in obj]
                 return obj
 
-            def _preview(canon: str, limit: int = 6000) -> str:
-                """Return canon as-is if short, else a truncated preview with a trailing sha1 digest."""
-                if len(canon) <= limit:
-                    return canon
-                import hashlib
-                digest = hashlib.sha1(canon.encode("utf-8", "replace")).hexdigest()[:10]
-                return f"{canon[:limit]}...(truncated {len(canon)}c sha1={digest})"
+            def _preview(m: dict, limit: int = 6000) -> str:
+                """Block layout of a message with every content string redacted,
+                so PREV/NOW lines show which block drifted, never what it says."""
+                redacted = json.dumps(self._strip_payload({"messages": [m]})["messages"][0],
+                                      ensure_ascii=False, separators=(",", ":"), default=str)
+                return redacted if len(redacted) <= limit else f"{redacted[:limit]}...(truncated {len(redacted)}c)"
 
             def _hash_msg(m: dict) -> tuple[str, str, str]:
                 """Return (insertion_order_hash, sorted_hash, preview). The SDK sends
@@ -4180,7 +4186,7 @@ class Pipe:
                     canon_sorted = repr(stripped)
                 ins_h = hashlib.sha1(canon_ins.encode("utf-8")).hexdigest()[:10]
                 sort_h = hashlib.sha1(canon_sorted.encode("utf-8")).hexdigest()[:10]
-                return (ins_h, sort_h, _preview(canon_ins))
+                return (ins_h, sort_h, _preview(stripped))
 
             def _summarize(m: dict) -> str:
                 """Build a short human-readable summary of a message's role and content blocks."""
@@ -4345,7 +4351,7 @@ class Pipe:
                         logger.warning(
                             f"  {marker} msg[{i}]: ins prev={pi} now={ni} | sort prev={ps} now={ns} {sm}"
                         )
-                    # Dump FULL JSON (insertion order) for diffing
+                    # Block layout with redacted strings: shows which block drifted
                     if ins_first_diff < len(prev_previews):
                         logger.warning(
                             f"  ** msg[{ins_first_diff}] PREV-INS-ORDER: "
@@ -4724,10 +4730,8 @@ class Pipe:
 
                     if extracted_memories:
                         logger.debug(
-                            f"✓ Extracted User Context: {extracted_memories[:100]}..."
-                        )
-                        logger.debug(
-                            f"✓ System prompt after removal (last 200 chars): ...{cleaned_text[-200:]}"
+                            f"✓ Extracted User Context: {len(extracted_memories)}c, "
+                            f"system prompt now {len(cleaned_text)}c"
                         )
 
                     # Update block with cleaned text
@@ -5405,7 +5409,7 @@ class Pipe:
                 except (json.JSONDecodeError, ValueError):
                     logger.warning(
                         f"Failed to parse tool_use arguments for "
-                        f"{tc_name!r}: {tc_args_raw[:120]!r}"
+                        f"{tc_name!r} ({len(tc_args_raw)}c)"
                     )
                     tc_input = {}
                 current_assistant.append({
@@ -6129,7 +6133,7 @@ class Pipe:
             file_path = Path(file_path)
 
             if not file_path.is_file():
-                logger.warning(f"PDF file not found on disk: {file_path}")
+                logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
             # Read and encode the PDF
@@ -6146,7 +6150,7 @@ class Pipe:
                 return None
 
             logger.debug(
-                f"Successfully encoded PDF: {filename} ({len(pdf_data)} bytes)"
+                f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"
             )
             return (encoded_data, filename)
 
@@ -6561,7 +6565,7 @@ class Pipe:
                 if file_record_check and file_record_check.meta:
                     content_type = file_record_check.meta.get("content_type", "")
             if content_type and content_type.startswith("image/"):
-                logger.debug(f"Skipping image file for Files API: {file_name} ({content_type})")
+                logger.debug(f"Skipping image file for Files API: {file_id_owui} ({content_type})")
                 continue
 
             # Look up OpenWebUI file record for cached anthropic_file_id
@@ -6578,7 +6582,7 @@ class Pipe:
                 # Cached — reuse without re-uploading
                 if msg_num is None:
                     msg_num = current_user_msg_num
-                logger.debug(f"♻️ Reusing cached file {file_name} → {anthropic_file_id} (msg {msg_num})")
+                logger.debug(f"♻️ Reusing cached file {file_id_owui} → {anthropic_file_id} (msg {msg_num})")
             else:
                 # New file — upload to Anthropic
                 try:
@@ -6604,11 +6608,11 @@ class Pipe:
                         "anthropic_file_msg_idx": msg_num,
                     })
 
-                    logger.info(f"☁️ Uploaded {file_name} → {anthropic_file_id} (msg {msg_num})")
+                    logger.info(f"☁️ Uploaded {file_id_owui} → {anthropic_file_id} (msg {msg_num})")
 
                     await emit_status(f"☁️ Uploaded {file_name}", done=True)
                 except Exception as e:
-                    logger.error(f"Failed to upload {file_name}: {e}")
+                    logger.error(f"Failed to upload {file_id_owui}: {e}")
                     await emit_notification(f"Failed to upload {file_name}: {str(e)[:100]}")
                     continue
 
@@ -8437,7 +8441,7 @@ class Pipe:
             # Join without adding line breaks - preserve original formatting
             result = "".join(text_parts).strip()
 
-            logger.debug(f"Task response: {result}")
+            logger.debug(f"Task response: {len(result)}c")
 
             return result
 
@@ -9039,7 +9043,7 @@ class Pipe:
                 logger.debug(f"No citation data found in event")
                 return
 
-            logger.debug(f" Citation data found: {citation}")
+            logger.debug(f" Citation data found: {getattr(citation, 'type', None) or (citation.get('type') if isinstance(citation, dict) else '?')}")
 
             # Only handle web search result citations
             citation_type = getattr(citation, "type", "")
@@ -9216,12 +9220,10 @@ class Pipe:
                 # Environment first: most bug reports come down to an OpenWebUI
                 # version whose behaviour differs from the one under test.
                 logger.debug(f"OpenWebUI version: {OPENWEBUI_VERSION}")
-                logger.debug(f"Valves: {self.valves.model_dump()}")
+                logger.debug(f"Valves: {self.valves.model_dump(exclude={'ANTHROPIC_API_KEY'})}")
                 user_valves = __user__.get("valves")
                 if user_valves and hasattr(user_valves, "model_dump"):
-                    logger.debug(f"UserValves: {user_valves.model_dump()}")
-                elif user_valves:
-                    logger.debug(f"UserValves: {user_valves}")
+                    logger.debug(f"UserValves: {user_valves.model_dump(exclude={'ANTHROPIC_API_KEY'})}")
 
             # Get API key - check UserValves first, then fall back to admin valve
             user_valves = __user__.get("valves")
@@ -9515,7 +9517,7 @@ class Pipe:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
-                            logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts} | payload: {event}")
+                            logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
                                 # Note: Container ID is not in message_start for streaming;
                                 # it arrives in message_delta.
@@ -9845,7 +9847,7 @@ class Pipe:
                                             tool_use_state.progress_blocks = {}
 
                                     logger.debug(
-                                        f" Tool use detected, collected {len(tool_calls)} tool results:\nTool_Call JSON: {tool_calls}"
+                                        f" Tool use detected, collected {len(tool_calls)} tool results"
                                     )
 
                                     # Reset for next iteration
@@ -9893,7 +9895,7 @@ class Pipe:
                                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                                     if _explanation:
                                         _ref_msg += f"\n\n_{_explanation}_"
-                                    logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={(_explanation or '')[:120]!r}")
+                                    logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={len(_explanation or '')}c")
                                     text_state.chunk += _ref_msg
                                     conversation_ended = True
                                 elif stop_reason == "stop_sequence":

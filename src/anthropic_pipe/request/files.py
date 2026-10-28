@@ -42,7 +42,7 @@ class PipeRequestFilesMethods:
             file_path = Path(file_path)
 
             if not file_path.is_file():
-                logger.warning(f"PDF file not found on disk: {file_path}")
+                logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
             # Read and encode the PDF
@@ -59,7 +59,7 @@ class PipeRequestFilesMethods:
                 return None
 
             logger.debug(
-                f"Successfully encoded PDF: {filename} ({len(pdf_data)} bytes)"
+                f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"
             )
             return (encoded_data, filename)
 
@@ -474,7 +474,7 @@ class PipeRequestFilesMethods:
                 if file_record_check and file_record_check.meta:
                     content_type = file_record_check.meta.get("content_type", "")
             if content_type and content_type.startswith("image/"):
-                logger.debug(f"Skipping image file for Files API: {file_name} ({content_type})")
+                logger.debug(f"Skipping image file for Files API: {file_id_owui} ({content_type})")
                 continue
 
             # Look up OpenWebUI file record for cached anthropic_file_id
@@ -491,7 +491,7 @@ class PipeRequestFilesMethods:
                 # Cached — reuse without re-uploading
                 if msg_num is None:
                     msg_num = current_user_msg_num
-                logger.debug(f"♻️ Reusing cached file {file_name} → {anthropic_file_id} (msg {msg_num})")
+                logger.debug(f"♻️ Reusing cached file {file_id_owui} → {anthropic_file_id} (msg {msg_num})")
             else:
                 # New file — upload to Anthropic
                 try:
@@ -517,11 +517,11 @@ class PipeRequestFilesMethods:
                         "anthropic_file_msg_idx": msg_num,
                     })
 
-                    logger.info(f"☁️ Uploaded {file_name} → {anthropic_file_id} (msg {msg_num})")
+                    logger.info(f"☁️ Uploaded {file_id_owui} → {anthropic_file_id} (msg {msg_num})")
 
                     await emit_status(f"☁️ Uploaded {file_name}", done=True)
                 except Exception as e:
-                    logger.error(f"Failed to upload {file_name}: {e}")
+                    logger.error(f"Failed to upload {file_id_owui}: {e}")
                     await emit_notification(f"Failed to upload {file_name}: {str(e)[:100]}")
                     continue
 

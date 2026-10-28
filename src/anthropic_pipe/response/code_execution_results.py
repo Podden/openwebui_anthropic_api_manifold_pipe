@@ -45,7 +45,7 @@ async def _download_links_for(files_output: Any, ctx: Any) -> list[str]:
 async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
     """Close the bash code block with its stdout/stderr/return code and any files."""
     server_tool = ctx.state.server_tool
-    logger.debug("Processing bash_code_execution_tool_result: %s", content_block)
+    logger.debug("Processing bash_code_execution_tool_result")
     await ctx.pipe._persist_server_tool_result(
         content_block,
         "bash_code_execution_tool_result",
@@ -93,7 +93,7 @@ async def _handle_bash_result(content_block: Any, ctx: Any) -> None:
 async def _handle_text_editor_result(content_block: Any, ctx: Any) -> None:
     """Render the outcome of a text_editor call: created file, viewed file, or error."""
     server_tool = ctx.state.server_tool
-    logger.debug("Processing text_editor_code_execution_tool_result: %s", content_block)
+    logger.debug("Processing text_editor_code_execution_tool_result")
     await ctx.pipe._persist_server_tool_result(
         content_block,
         "text_editor_code_execution_tool_result",

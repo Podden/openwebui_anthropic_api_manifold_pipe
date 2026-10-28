@@ -69,12 +69,10 @@ class PipeOrchestratorMethods:
                 # Environment first: most bug reports come down to an OpenWebUI
                 # version whose behaviour differs from the one under test.
                 logger.debug(f"OpenWebUI version: {OPENWEBUI_VERSION}")
-                logger.debug(f"Valves: {self.valves.model_dump()}")
+                logger.debug(f"Valves: {self.valves.model_dump(exclude={'ANTHROPIC_API_KEY'})}")
                 user_valves = __user__.get("valves")
                 if user_valves and hasattr(user_valves, "model_dump"):
-                    logger.debug(f"UserValves: {user_valves.model_dump()}")
-                elif user_valves:
-                    logger.debug(f"UserValves: {user_valves}")
+                    logger.debug(f"UserValves: {user_valves.model_dump(exclude={'ANTHROPIC_API_KEY'})}")
 
             # Get API key - check UserValves first, then fall back to admin valve
             user_valves = __user__.get("valves")
@@ -368,7 +366,7 @@ class PipeOrchestratorMethods:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
                             stream_event_counts[event_type] = stream_event_counts.get(event_type, 0) + 1
-                            logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts} | payload: {event}")
+                            logger.debug(f"Received stream event: {event_type} | counts: {stream_event_counts}")
                             if event_type == "message_start":
                                 # Note: Container ID is not in message_start for streaming;
                                 # it arrives in message_delta.
@@ -698,7 +696,7 @@ class PipeOrchestratorMethods:
                                             tool_use_state.progress_blocks = {}
 
                                     logger.debug(
-                                        f" Tool use detected, collected {len(tool_calls)} tool results:\nTool_Call JSON: {tool_calls}"
+                                        f" Tool use detected, collected {len(tool_calls)} tool results"
                                     )
 
                                     # Reset for next iteration
@@ -746,7 +744,7 @@ class PipeOrchestratorMethods:
                                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                                     if _explanation:
                                         _ref_msg += f"\n\n_{_explanation}_"
-                                    logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={(_explanation or '')[:120]!r}")
+                                    logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={len(_explanation or '')}c")
                                     text_state.chunk += _ref_msg
                                     conversation_ended = True
                                 elif stop_reason == "stop_sequence":

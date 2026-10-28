@@ -141,7 +141,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
             # absorbs the repeats as the remaining deltas re-parse the same JSON.
             await ctx.status.searching_web(query)
             if query != ctx.state.text.current_search_query:
-                logger.debug("Web search query complete: '%s'", query)
+                logger.debug("Web search query complete (%dc)", len(query))
                 ctx.state.text.current_search_query = query
 
     elif tool_name == "web_fetch":
@@ -159,7 +159,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
     elif tool_name == "bash_code_execution":
         if "command" in parsed:
             server_tool.bash_command = parsed["command"]
-            logger.debug("Bash execution command: %s...", server_tool.bash_command[:100])
+            logger.debug("Bash execution command (%dc)", len(server_tool.bash_command))
             if _shows_code_preview(server_tool):
                 await _stream_code_preview(ctx, parsed["command"], "bash")
 
@@ -186,7 +186,7 @@ async def handle_server_tool_input_delta(partial: str, ctx: Any) -> None:
 
     elif tool_name in ("tool_search_tool_regex", "tool_search_tool_bm25"):
         if "query" in parsed:
-            logger.debug("Tool search query: '%s'", parsed["query"])
+            logger.debug("Tool search query (%dc)", len(str(parsed["query"])))
             await ctx.status.searching_tools(parsed["query"])
 
 

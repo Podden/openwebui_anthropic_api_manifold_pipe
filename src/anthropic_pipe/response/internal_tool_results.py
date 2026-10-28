@@ -50,7 +50,7 @@ async def handle_advisor_result_block_start(content_block: Any, ctx: Any) -> Non
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     emit_delta = ctx.emit_delta
-    logger.debug(" Processing advisor result event: %s", content_block)
+    logger.debug(" Processing advisor result event")
     tool_use_id = getattr(content_block, "tool_use_id", "") or ""
     content = getattr(content_block, "content", None)
     inner_type = (
@@ -115,7 +115,7 @@ async def handle_tool_search_result_block_start(content_block: Any, ctx: Any) ->
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     emit_delta = ctx.emit_delta
-    logger.debug(" Processing tool search result event: %s", content_block)
+    logger.debug(" Processing tool search result event")
     tool_use_id = getattr(content_block, "tool_use_id", "") or ""
     content_obj = getattr(content_block, "content", None)
     tool_references = []

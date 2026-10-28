@@ -18,7 +18,7 @@ async def handle_web_tool_result_block_start(
     server_tool_use_carriers = ctx.state.server_tool.use_carriers
     update_content_block = ctx.update_content_block
     if content_type == "web_search_tool_result":
-        logger.debug(" Processing web search result event: %s", content_block)
+        logger.debug(" Processing web search result event")
         content_items = getattr(content_block, "content", None)
         tool_use_id = getattr(content_block, "tool_use_id", "") or ""
         error_code = None
