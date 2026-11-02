@@ -2872,6 +2872,8 @@ DETAIL_FORMAT = "anthropic-messages-v1"
 REASONING_BLOCKS = ("thinking", "redacted_thinking")
 CALL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
 SUMMARY_LIMIT = 8000
+
+TEXT_RESYNC_SECONDS = 2.0
 _DATA_IMAGE = re.compile(r"data:image/[a-z]+;base64,[A-Za-z0-9+/]+=*")
 
 def _new_id(prefix: str) -> str:
@@ -3001,7 +3003,7 @@ class ItemStream:
             idx = self._open_message()
             parts = self.items[idx]["content"]
             parts.append({"type": "output_text", "text": "", "annotations": []})
-            self._blocks[index] = ("text", idx, len(parts) - 1)
+            self._blocks[index] = ("text", idx, len(parts) - 1, time.monotonic())
         elif btype in CALL_BLOCKS:
             self._close_message()
             call_id = getattr(block, "id", "") or _new_id("call")
@@ -3037,9 +3039,15 @@ class ItemStream:
                         "output_index": idx, "content_index": 0, "delta": text})
         elif kind == "text" and dtype == "text_delta":
             text = getattr(delta, "text", "") or ""
-            self.items[idx]["content"][entry[2]]["text"] += text
+            part = self.items[idx]["content"][entry[2]]
+            part["text"] += text
             self._emit({"type": "response.output_text.delta", "item_id": self.items[idx]["id"],
                         "output_index": idx, "content_index": entry[2], "delta": text})
+            now = time.monotonic()
+            if now - entry[3] >= TEXT_RESYNC_SECONDS:
+                self._blocks[getattr(event, "index", None)] = (*entry[:3], now)
+                self._emit({"type": "response.output_text.done", "item_id": self.items[idx]["id"],
+                            "output_index": idx, "content_index": entry[2], "text": part["text"]})
         elif kind == "call" and dtype == "input_json_delta":
             text = getattr(delta, "partial_json", "") or ""
             self.items[idx]["arguments"] += text
