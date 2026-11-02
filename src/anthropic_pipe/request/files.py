@@ -45,18 +45,23 @@ class PipeRequestFilesMethods:
                 logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
-            # Read and encode the PDF
+            # Request size limit: 128 MB on the first-party Claude API since
+            # 2026-10-28, 20-32 MB on proxies and partner platforms. base64 adds
+            # a third and the rest of the conversation shares the request.
+            # ponytail: per-file cap only; several large PDFs in one chat can
+            # still add up past the limit (API answers 413).
+            if self.valves.ANTHROPIC_BASE_URL.rstrip("/") == self._DEFAULT_API_BASE:
+                max_pdf_size = 64 * 1024 * 1024
+            else:
+                max_pdf_size = 25 * 1024 * 1024
+            pdf_size = file_path.stat().st_size
+            if pdf_size > max_pdf_size:
+                logger.warning(f"PDF too large for native upload: {pdf_size} bytes")
+                return None
+
             with open(file_path, "rb") as pdf_file:
                 pdf_data = pdf_file.read()
                 encoded_data = base64.b64encode(pdf_data).decode("utf-8")
-
-            # Check size limits (Anthropic has 32MB request limit, be conservative)
-            MAX_PDF_SIZE = 25 * 1024 * 1024  # 25 MB
-            if len(pdf_data) > MAX_PDF_SIZE:
-                logger.warning(
-                    f"PDF too large for native upload: {len(pdf_data)} bytes"
-                )
-                return None
 
             logger.debug(
                 f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"

@@ -43,7 +43,7 @@ async def handle_thinking_delta(delta: Any, ctx: Any) -> None:
     thinking.message += thinking_text
     if thinking_text:
         formatted = ctx.pipe._format_thinking_block(thinking.message, duration=None)
-        await ctx.update_content_block(thinking.last_block, formatted)
+        await ctx.update_content_block(thinking.last_block, formatted, progress=True)
         thinking.last_block = formatted
 
 

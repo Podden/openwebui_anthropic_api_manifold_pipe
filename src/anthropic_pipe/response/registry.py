@@ -87,5 +87,7 @@ class HandlerRegistry:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None) or ctx.state.tool_use.current_block_type
         handled = await self.for_block_type(block_type).on_stop(event, ctx)
+        # A block's last progress re-render may only have been shown; store it.
+        await ctx.flush_replace()
         ctx.state.reset_current_block()
         return handled

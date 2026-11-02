@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.2
+version: 0.10.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -32,11 +32,19 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5.5 / 5 / 4.8
+- Fast Mode for Opus 5.5 / 5
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.10.3
+- Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
+- Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
+- Follow-ups no longer fail with "tool_use ids were found without tool_result blocks immediately after" when a local tool round was followed by thinking or a server tool such as web search. Replay used to end a tool round only at text and folded two rounds into one assistant message; it now ends the round at any content. A server tool the model called in the same response as a client tool stays with it (marked since v0.9.39). Chats replayed with the old structure get one prompt-cache miss (#58, reported by @yinccc999).
+- A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
+- Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
+- Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
+
 v0.10.2
 - Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
@@ -45,14 +53,6 @@ v0.10.2
 v0.10.1
 - OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
 - ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
-
-v0.10.0
-- API version 2026-10-21 and anthropic SDK 2.x (requirement `anthropic~=2.0`; OpenWebUI upgrades it when it loads the pipe).
-- temperature / top_p / top_k from model params are no longer sent. 2026-10-21 rejects them on every model, and with SDK 1.9+ they already failed with a TypeError on Haiku 4.5, Sonnet 4.5 and Opus 4.5.
-- SDK 2.x authenticates with `Authorization: Bearer`. A custom ANTHROPIC_BASE_URL (proxy, gateway) also gets the key as `x-api-key` so gateways that read only that header keep working.
-- Fast mode on Opus 5.5 is GA and goes out without the beta header; Opus 5 and Opus 4.8 keep it.
-- /v1/models: `server_tools` gates the web search and code execution tools per model, `thinking.types` picks how a thinking-on-by-default model is switched off (disabled or between_tools).
-- Web fetch switched off for the organization in the Claude Console: the turn retries once without the tool and shows a warning instead of failing with a 400.
 
 """
 
@@ -749,6 +749,21 @@ class StreamState:
         self.tool_use.current_block_type = None
 # END GENERATED SECTION: anthropic_pipe.response.state
 
+# OpenWebUI writes every `replace` and `message` event into the database, and
+# each write rewrites the whole chat row (full history JSON). Re-rendering a
+# block on every thinking / tool-input / compaction delta therefore wrote a long
+# chat hundreds of times per turn (#59). Progress re-renders go out as
+# `chat:message` and text deltas as `chat:message:delta` instead -- same UI
+# effect, never persisted -- and the persisted `replace` follows at most once
+# per interval and at every block end.
+REPLACE_PERSIST_INTERVAL = 5.0
+# OpenWebUI's frontend only appends deltas: a page reloaded mid-stream starts
+# from the stored copy, a reconnected socket keeps its local copy, and both miss
+# the deltas in between. Every UI_RESYNC_INTERVAL a delta goes out as the full
+# content (`chat:message`) instead, so such a client is whole again within it.
+UI_RESYNC_INTERVAL = 2.0
+
+
 @dataclass
 class PipeRequestContext:
     """Request-scoped helpers and stream state — the single object handlers receive.
@@ -781,14 +796,34 @@ class PipeRequestContext:
     api_tool_names: List[str] = field(default_factory=list)
     api_key: str = ""
 
+    # Persistence throttle for progress re-renders (see REPLACE_PERSIST_INTERVAL)
+    # and the last full-content UI event (see UI_RESYNC_INTERVAL).
+    persisted_at: float = 0.0
+    persist_pending: bool = False
+    shown_at: float = 0.0
+
     async def emit_event(self, event: dict) -> None:
         """Forward an event to the pipe's event emitter."""
         await self.pipe.emit_event(event, self.event_emitter)
 
     async def emit_delta(self, content: str) -> None:
-        """Emit a streaming content delta and append it to the accumulated message."""
-        await self.emit_event({"type": "message", "data": {"content": content}})
+        """Emit a streaming content delta and append it to the accumulated message.
+
+        Shown as an unpersisted ``chat:message:delta``, or as the full content
+        once UI_RESYNC_INTERVAL has passed; the stored copy catches up through a
+        ``replace`` once REPLACE_PERSIST_INTERVAL has passed and at every block end.
+        """
         self.final_message.append(content)
+        now = time.monotonic()
+        if now - self.persisted_at >= REPLACE_PERSIST_INTERVAL:
+            await self.emit_replace(self.text())
+            return
+        if now - self.shown_at >= UI_RESYNC_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": self.text()}})
+            self.shown_at = now
+        else:
+            await self.emit_event({"type": "chat:message:delta", "data": {"content": content}})
+        self.persist_pending = True
 
     async def emit_block(self, block: str) -> None:
         """Emit a rendered block, guaranteeing it starts on its own line.
@@ -808,13 +843,33 @@ class PipeRequestContext:
             block = "\n" + block
         await self.emit_delta(block)
 
-    async def emit_replace(self, content: str) -> None:
-        """Emit a full-content replace event and reset the accumulated message to it."""
-        await self.emit_event({"type": "replace", "data": {"content": content}})
+    async def emit_replace(self, content: str, *, progress: bool = False) -> None:
+        """Emit a full-content replace event and reset the accumulated message to it.
+
+        ``progress=True`` marks an intermediate re-render (one per stream delta):
+        it reaches the UI as an unpersisted ``chat:message`` unless the last
+        stored ``replace`` is older than REPLACE_PERSIST_INTERVAL.
+        """
+        now = time.monotonic()
+        if progress and now - self.persisted_at < REPLACE_PERSIST_INTERVAL:
+            await self.emit_event({"type": "chat:message", "data": {"content": content}})
+            self.persist_pending = True
+        else:
+            await self.emit_event({"type": "replace", "data": {"content": content}})
+            self.persisted_at = now
+            self.persist_pending = False
+        self.shown_at = now
         self.final_message.clear()
         self.final_message.append(content)
 
-    async def update_content_block(self, old_block: str, new_block: str) -> None:
+    async def flush_replace(self) -> None:
+        """Store the current content if a progress re-render was only shown, not stored."""
+        if self.persist_pending:
+            await self.emit_replace(self.text())
+
+    async def update_content_block(
+        self, old_block: str, new_block: str, *, progress: bool = False
+    ) -> None:
         """Replace old_block in accumulated content with new_block, preserving surrounding text."""
         if not old_block and not new_block:
             # Slim (sub-agent) output formats every collapsible to "". Without
@@ -826,11 +881,11 @@ class PipeRequestContext:
             idx = text.find(old_block)
             if idx != -1:
                 text = text[:idx] + new_block + text[idx + len(old_block):]
-                await self.emit_replace(text)
+                await self.emit_replace(text, progress=progress)
                 return
         # First emit or old block not found — append and replace with full text
         text = self.pipe._append_block_to_text(self.text(), new_block)
-        await self.emit_replace(text)
+        await self.emit_replace(text, progress=progress)
 
     def text(self) -> str:
         """Return the accumulated message content as a single string."""
@@ -876,7 +931,7 @@ async def create_request_payload(
     if pipe.valves.DATA_RESIDENCY == "us":
         payload["inference_geo"] = "us"
 
-    # Add Fast Mode if enabled and model supports it (Opus 4.8 / Opus 5).
+    # Add Fast Mode if enabled and model supports it (Opus 5.5 / Opus 5).
     # Two ways in: the admin valve turns it on for every request, the toggle
     # filter turns it on for a single message. Fast mode is a per-request
     # trade (latency against depth), so the per-message switch is the one
@@ -1337,7 +1392,7 @@ async def create_request_payload(
     # speed. Bind to payload["speed"] -- set above from the valve OR the
     # per-message toggle and already gated on supports_fast_mode -- so the
     # opt-in header follows the toggle, not just the admin valve. Only the
-    # research-preview models (Opus 5, Opus 4.8) need it; Opus 5.5 is GA.
+    # research-preview model (Opus 5) needs it; Opus 5.5 is GA.
     if payload.get("speed") == "fast" and model_info.get("fast_mode_beta"):
         beta_headers.append("fast-mode-2026-02-01")
 
@@ -1841,6 +1896,8 @@ class HandlerRegistry:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None) or ctx.state.tool_use.current_block_type
         handled = await self.for_block_type(block_type).on_stop(event, ctx)
+        # A block's last progress re-render may only have been shown; store it.
+        await ctx.flush_replace()
         ctx.state.reset_current_block()
         return handled
 # END GENERATED SECTION: anthropic_pipe.response.registry
@@ -1995,7 +2052,7 @@ async def handle_thinking_delta(delta: Any, ctx: Any) -> None:
     thinking.message += thinking_text
     if thinking_text:
         formatted = ctx.pipe._format_thinking_block(thinking.message, duration=None)
-        await ctx.update_content_block(thinking.last_block, formatted)
+        await ctx.update_content_block(thinking.last_block, formatted, progress=True)
         thinking.last_block = formatted
 
 
@@ -2042,7 +2099,7 @@ async def handle_compaction_delta(delta: Any, ctx: Any) -> None:
     compaction = ctx.state.compaction
     compaction.content += getattr(delta, "content", "")
     formatted = ctx.pipe._format_compaction_block(compaction.content)
-    await ctx.update_content_block(compaction.last_block, formatted)
+    await ctx.update_content_block(compaction.last_block, formatted, progress=True)
     compaction.last_block = formatted
 
 
@@ -2167,7 +2224,7 @@ async def handle_client_tool_input_delta(partial: str, ctx: Any) -> None:
     )
     text = ctx.text().replace(old_block, new_block, 1)
     tool_use.progress_blocks[tool_use.tool_id_at_start] = new_block
-    await ctx.emit_replace(text)
+    await ctx.emit_replace(text, progress=True)
 
 
 async def handle_tool_use_block_stop(ctx: Any) -> None:
@@ -2422,7 +2479,7 @@ async def _stream_code_preview(ctx: Any, code: str, lang: str) -> None:
     server_tool.current_code = code
     server_tool.current_lang = lang
     block = ctx.pipe._format_code_execution_block(code, lang)
-    await ctx.update_content_block(server_tool.last_block, block)
+    await ctx.update_content_block(server_tool.last_block, block, progress=True)
     server_tool.last_block = block
 
 
@@ -3514,8 +3571,8 @@ class Pipe:
         },
         "claude-opus-4-8": {
             "supports_dynamic_filtering": True,
-            "supports_fast_mode": True,
-            "fast_mode_beta": True,
+            # Fast mode deprecated 2026-10-30, removed 2026-11-30: speed:"fast"
+            # then returns an error. Not offered any more; use Opus 5.5.
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -3524,7 +3581,7 @@ class Pipe:
             "supports_dynamic_filtering": True,
             # Fast mode removed for Opus 4.7 (2026-07-24): speed:"fast" now
             # returns an error instead of falling back to standard speed.
-            # Use Opus 5 or Opus 4.8 for fast mode.
+            # Use Opus 5.5 or Opus 5 for fast mode.
             "supports_compaction": True,
             "supports_adaptive_thinking": True,
             "supports_structured_outputs": True,
@@ -3586,7 +3643,7 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5 / 4.8). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -5317,8 +5374,9 @@ class Pipe:
         Returns a list of ``{"role": ..., "content": [...]}`` dicts. Each
         consecutive run of ``tool_calls`` becomes one assistant message with
         multiple ``tool_use`` blocks followed by a single user message carrying
-        all matching ``tool_result`` blocks. Text between tool-call runs
-        terminates the current turn and starts a new assistant message.
+        all matching ``tool_result`` blocks. Any content between tool-call runs
+        (text, thinking, server tools) terminates the current turn and starts
+        a new assistant message.
         """
         segments: list[tuple[str, str]] = []
         last_end = 0
@@ -5357,18 +5415,15 @@ class Pipe:
                 blocks = self._convert_content_to_claude_format(data, role="assistant")
                 if not blocks:
                     continue
-                # Only real prose terminates the prior turn. A segment holding
-                # nothing but server-tool carriers (web_search and friends are
-                # rendered as <details type="tool_calls"> too, but carry
-                # data-payload-b64 and are therefore skipped by
-                # PATTERN_TOOL_CALLS_BLOCK) belongs to the SAME assistant
-                # message it was emitted in. Flushing there produced
-                # assistant[text, tool_use] / user[tool_result] /
-                # assistant[server_tool_use] -- three messages where the live
-                # turn had two.
-                if pending_results and any(
-                    isinstance(b, dict) and b.get("type") == "text" for b in blocks
-                ):
+                # Anything after a finished client tool round -- prose, thinking,
+                # a server tool -- was produced by the NEXT response, which the
+                # API only starts once the round's tool_results are in. Closing
+                # the round on prose alone folded A / [web search, thinking] / B
+                # into one assistant message, and the API rejected A for having
+                # blocks after it instead of its tool_result (#58). The one
+                # exception: a server tool called in the SAME response as the
+                # client tool_use (marked after-client, see below).
+                if pending_results:
                     # A server tool the model called right after the client
                     # tool_use belongs to that same assistant message; only its
                     # result opens the next one (see server_tool.py, after_client).
@@ -6136,18 +6191,23 @@ class Pipe:
                 logger.warning(f"PDF file not found on disk: {file_id}")
                 return None
 
-            # Read and encode the PDF
+            # Request size limit: 128 MB on the first-party Claude API since
+            # 2026-10-28, 20-32 MB on proxies and partner platforms. base64 adds
+            # a third and the rest of the conversation shares the request.
+            # ponytail: per-file cap only; several large PDFs in one chat can
+            # still add up past the limit (API answers 413).
+            if self.valves.ANTHROPIC_BASE_URL.rstrip("/") == self._DEFAULT_API_BASE:
+                max_pdf_size = 64 * 1024 * 1024
+            else:
+                max_pdf_size = 25 * 1024 * 1024
+            pdf_size = file_path.stat().st_size
+            if pdf_size > max_pdf_size:
+                logger.warning(f"PDF too large for native upload: {pdf_size} bytes")
+                return None
+
             with open(file_path, "rb") as pdf_file:
                 pdf_data = pdf_file.read()
                 encoded_data = base64.b64encode(pdf_data).decode("utf-8")
-
-            # Check size limits (Anthropic has 32MB request limit, be conservative)
-            MAX_PDF_SIZE = 25 * 1024 * 1024  # 25 MB
-            if len(pdf_data) > MAX_PDF_SIZE:
-                logger.warning(
-                    f"PDF too large for native upload: {len(pdf_data)} bytes"
-                )
-                return None
 
             logger.debug(
                 f"Successfully encoded PDF: {file_id} ({len(pdf_data)} bytes)"
@@ -9143,16 +9203,15 @@ class Pipe:
                 blocks.append(block_dict)
                 continue
 
-            # tool_use blocks: strip "direct" caller (API rejects it),
-            # but preserve programmatic caller (needed for code_execution routing)
-            if block_type == "tool_use":
-                caller = block_dict.get("caller")
-                if caller and caller.get("type") == "direct":
-                    block_dict.pop("caller", None)
-                blocks.append(block_dict)
-                continue
+            # Strip a "direct" caller from every block: the API rejects it on
+            # tool_use, and replay rebuilds *_tool_result blocks without it, so
+            # keeping it here breaks the cache prefix on the next turn. A
+            # programmatic caller stays (needed for code_execution routing).
+            caller = block_dict.get("caller")
+            if isinstance(caller, dict) and caller.get("type") == "direct":
+                block_dict.pop("caller", None)
 
-            # All other blocks (server_tool_use, *_tool_result, etc.):
+            # All other blocks (tool_use, server_tool_use, *_tool_result, etc.):
             # pass through as-is to preserve thinking block positions
             blocks.append(block_dict)
 

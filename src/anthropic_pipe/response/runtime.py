@@ -590,16 +590,15 @@ class PipeStreamRuntimeSupportMethods:
                 blocks.append(block_dict)
                 continue
 
-            # tool_use blocks: strip "direct" caller (API rejects it),
-            # but preserve programmatic caller (needed for code_execution routing)
-            if block_type == "tool_use":
-                caller = block_dict.get("caller")
-                if caller and caller.get("type") == "direct":
-                    block_dict.pop("caller", None)
-                blocks.append(block_dict)
-                continue
+            # Strip a "direct" caller from every block: the API rejects it on
+            # tool_use, and replay rebuilds *_tool_result blocks without it, so
+            # keeping it here breaks the cache prefix on the next turn. A
+            # programmatic caller stays (needed for code_execution routing).
+            caller = block_dict.get("caller")
+            if isinstance(caller, dict) and caller.get("type") == "direct":
+                block_dict.pop("caller", None)
 
-            # All other blocks (server_tool_use, *_tool_result, etc.):
+            # All other blocks (tool_use, server_tool_use, *_tool_result, etc.):
             # pass through as-is to preserve thinking block positions
             blocks.append(block_dict)
 

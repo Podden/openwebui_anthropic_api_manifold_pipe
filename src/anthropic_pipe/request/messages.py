@@ -681,8 +681,9 @@ class PipeRequestMessagesMethods:
         Returns a list of ``{"role": ..., "content": [...]}`` dicts. Each
         consecutive run of ``tool_calls`` becomes one assistant message with
         multiple ``tool_use`` blocks followed by a single user message carrying
-        all matching ``tool_result`` blocks. Text between tool-call runs
-        terminates the current turn and starts a new assistant message.
+        all matching ``tool_result`` blocks. Any content between tool-call runs
+        (text, thinking, server tools) terminates the current turn and starts
+        a new assistant message.
         """
         segments: list[tuple[str, str]] = []
         last_end = 0
@@ -721,18 +722,15 @@ class PipeRequestMessagesMethods:
                 blocks = self._convert_content_to_claude_format(data, role="assistant")
                 if not blocks:
                     continue
-                # Only real prose terminates the prior turn. A segment holding
-                # nothing but server-tool carriers (web_search and friends are
-                # rendered as <details type="tool_calls"> too, but carry
-                # data-payload-b64 and are therefore skipped by
-                # PATTERN_TOOL_CALLS_BLOCK) belongs to the SAME assistant
-                # message it was emitted in. Flushing there produced
-                # assistant[text, tool_use] / user[tool_result] /
-                # assistant[server_tool_use] -- three messages where the live
-                # turn had two.
-                if pending_results and any(
-                    isinstance(b, dict) and b.get("type") == "text" for b in blocks
-                ):
+                # Anything after a finished client tool round -- prose, thinking,
+                # a server tool -- was produced by the NEXT response, which the
+                # API only starts once the round's tool_results are in. Closing
+                # the round on prose alone folded A / [web search, thinking] / B
+                # into one assistant message, and the API rejected A for having
+                # blocks after it instead of its tool_result (#58). The one
+                # exception: a server tool called in the SAME response as the
+                # client tool_use (marked after-client, see below).
+                if pending_results:
                     # A server tool the model called right after the client
                     # tool_use belongs to that same assistant message; only its
                     # result opens the next one (see server_tool.py, after_client).

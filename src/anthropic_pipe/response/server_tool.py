@@ -107,7 +107,7 @@ async def _stream_code_preview(ctx: Any, code: str, lang: str) -> None:
     server_tool.current_code = code
     server_tool.current_lang = lang
     block = ctx.pipe._format_code_execution_block(code, lang)
-    await ctx.update_content_block(server_tool.last_block, block)
+    await ctx.update_content_block(server_tool.last_block, block, progress=True)
     server_tool.last_block = block
 
 

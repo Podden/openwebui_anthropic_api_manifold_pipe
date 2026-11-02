@@ -24,7 +24,7 @@ async def handle_compaction_delta(delta: Any, ctx: Any) -> None:
     compaction = ctx.state.compaction
     compaction.content += getattr(delta, "content", "")
     formatted = ctx.pipe._format_compaction_block(compaction.content)
-    await ctx.update_content_block(compaction.last_block, formatted)
+    await ctx.update_content_block(compaction.last_block, formatted, progress=True)
     compaction.last_block = formatted
 
 

@@ -149,7 +149,7 @@ async def handle_client_tool_input_delta(partial: str, ctx: Any) -> None:
     )
     text = ctx.text().replace(old_block, new_block, 1)
     tool_use.progress_blocks[tool_use.tool_id_at_start] = new_block
-    await ctx.emit_replace(text)
+    await ctx.emit_replace(text, progress=True)
 
 
 async def handle_tool_use_block_stop(ctx: Any) -> None:
