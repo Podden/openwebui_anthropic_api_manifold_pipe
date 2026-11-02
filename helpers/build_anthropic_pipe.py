@@ -48,6 +48,7 @@ STREAM_SOURCES = [
     ("response.web_tool_results", SRC_DIR / "response" / "web_tool_results.py"),
     ("response.internal_tool_results", SRC_DIR / "response" / "internal_tool_results.py"),
     ("shared.pricing", SRC_DIR / "shared" / "pricing.py"),
+    ("shared.output_items", SRC_DIR / "shared" / "output_items.py"),
 ]
 
 
@@ -66,6 +67,7 @@ def _markers(section: str) -> tuple[str, str]:
 METHOD_GROUP_SOURCES = [
     SRC_DIR / "request" / "cache_control.py",
     SRC_DIR / "request" / "messages.py",
+    SRC_DIR / "request" / "legacy.py",
     SRC_DIR / "request" / "tools.py",
     SRC_DIR / "request" / "files.py",
     SRC_DIR / "request" / "rag.py",

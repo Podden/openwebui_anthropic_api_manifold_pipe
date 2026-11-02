@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.10.3
+version: 0.11.0
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
 environment_variables:
@@ -37,6 +37,14 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
+- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
+- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
+- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
+- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
+- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
+- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
+
 v0.10.3
 - Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
 - Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
@@ -49,10 +57,6 @@ v0.10.2
 - Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
 - Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
 - The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
-
-v0.10.1
-- OpenWebUI Tool Search with ENABLE_TOOL_SEARCH on: Claude's native tool search wins, and the `call_tool` dispatcher OpenWebUI 0.12.3 added is dropped along with `search_tools`. Before, `call_tool` reached the model pointing at a missing `search_tools`, and calling it ended the turn with its arguments shown as message text.
-- ENABLE_TOOL_SEARCH off: OpenWebUI's Tool Search now runs as OpenWebUI designed it (manifest, `search_tools`, `call_tool`, which the pipe resolves in its own tool loop) instead of being replaced by Claude's tool search anyway. Both off: no tool search.
 
 """
 
@@ -383,6 +387,11 @@ PATTERN_TOOL_RESULT_DATA_IMAGE = re.compile(
 # reason around. The memory reviewer is the worst case — it truncates each
 # message to 1600 characters, so a cache-diagnostics dump can crowd out the
 # actual conversation it is supposed to review.
+# The cache-diagnostics block (ENABLE_CACHE_DIAGNOSTICS) the pipe appends to a
+# turn's text; never part of what the model said.
+PATTERN_CACHE_DIAGNOSTICS_BLOCK = re.compile(
+    r'\n?<details type="cache-diagnostics">.*?</details>\n?', flags=re.DOTALL
+)
 PATTERN_ANY_DETAILS = re.compile(r"\n?<details[^>]*>.*?</details>\n?", flags=re.DOTALL)
 PATTERN_INLINE_METADATA_MARKER = re.compile(r"[ ]?\[\]\(anthropic:[^)]*\)[ ]?")
 # Removing a marker or carrier leaves the line it sat on whitespace-only, which
@@ -625,6 +634,9 @@ class PipeRenderStrategy:
 # effect, never persisted -- and the persisted `replace` follows at most once
 # per interval and at every block end.
 REPLACE_PERSIST_INTERVAL = 5.0
+# Events that write the message content or end it. With output items OpenWebUI
+# builds the content and signals completion itself; these would overwrite it.
+CONTENT_EVENT_TYPES = ("message", "replace", "chat:message", "chat:message:delta", "chat:completion")
 # OpenWebUI's frontend only appends deltas: a page reloaded mid-stream starts
 # from the stored copy, a reconnected socket keeps its local copy, and both miss
 # the deltas in between. Every UI_RESYNC_INTERVAL a delta goes out as the full
@@ -670,9 +682,24 @@ class PipeRequestContext:
     persist_pending: bool = False
     shown_at: float = 0.0
 
+    # Output items of this call (ItemStream) when the pipe streams them to
+    # OpenWebUI >= 0.12.2. Then content no longer goes out as text events: the
+    # accumulated text is only kept for the non-UI consumers of text().
+    items: Any = None
+
     async def emit_event(self, event: dict) -> None:
         """Forward an event to the pipe's event emitter."""
+        if self.items is not None and event.get("type") in CONTENT_EVENT_TYPES:
+            return
         await self.pipe.emit_event(event, self.event_emitter)
+
+    async def note(self, text: str) -> None:
+        """Pipe-authored text that belongs to the answer (limits, errors, the metadata marker)."""
+        if self.items is not None:
+            self.items.note(text)
+            self.final_message.append(text)
+            return
+        await self.emit_delta(text)
 
     async def emit_delta(self, content: str) -> None:
         """Emit a streaming content delta and append it to the accumulated message.
@@ -682,6 +709,8 @@ class PipeRequestContext:
         ``replace`` once REPLACE_PERSIST_INTERVAL has passed and at every block end.
         """
         self.final_message.append(content)
+        if self.items is not None:
+            return
         now = time.monotonic()
         if now - self.persisted_at >= REPLACE_PERSIST_INTERVAL:
             await self.emit_replace(self.text())
@@ -718,6 +747,9 @@ class PipeRequestContext:
         it reaches the UI as an unpersisted ``chat:message`` unless the last
         stored ``replace`` is older than REPLACE_PERSIST_INTERVAL.
         """
+        if self.items is not None:
+            self.final_message[:] = [content]
+            return
         now = time.monotonic()
         if progress and now - self.persisted_at < REPLACE_PERSIST_INTERVAL:
             await self.emit_event({"type": "chat:message", "data": {"content": content}})
@@ -732,7 +764,7 @@ class PipeRequestContext:
 
     async def flush_replace(self) -> None:
         """Store the current content if a progress re-render was only shown, not stored."""
-        if self.persist_pending:
+        if self.persist_pending and self.items is None:
             await self.emit_replace(self.text())
 
     async def update_content_block(
@@ -804,6 +836,9 @@ class PipeRequestContext:
 
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.pricing
 # END GENERATED SECTION: anthropic_pipe.shared.pricing
+
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.output_items
+# END GENERATED SECTION: anthropic_pipe.shared.output_items
 
 
 
@@ -1060,6 +1095,14 @@ class Pipe:
             default="",
             description="AWS 'Claude on AWS' workspace id. When set, sent as the 'anthropic-workspace-id' "
             "header on every request. Required when ANTHROPIC_BASE_URL points at an aws-external-anthropic endpoint.",
+        )
+        LEGACY_CHAT_MIGRATION: Literal["off", "dry-run", "on"] = Field(
+            default="dry-run",
+            description="One-time upgrade of chats written before pipe 0.11 to OpenWebUI output items. "
+            "dry-run: count what would change, on: convert, off: skip. Each runs once; the report "
+            "(anthropic_pipe_legacy_migration_*.json in OpenWebUI's data dir) is the marker, delete it to "
+            "run again. A turn is converted when the model gets the same messages afterwards; turns that "
+            "carried the cache-diagnostics block or adjacent text blocks miss the prompt cache once.",
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,

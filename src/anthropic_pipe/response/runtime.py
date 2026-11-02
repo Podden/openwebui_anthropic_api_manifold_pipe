@@ -301,13 +301,13 @@ class PipeStreamRuntimeSupportMethods:
                     # Same wording as the streaming path: this is the per-call
                     # output ceiling, not the context window.
                     _cap = payload_for_stream.get("max_tokens")
-                    await request_ctx.emit_delta(
+                    await request_ctx.note(
                         "\n\n⚠️ Response cut off: the model hit its output limit"
                         + (f" (max_tokens = {_cap:,})" if _cap else "")
                         + ". This is not the context window — raise max_tokens for this model."
                     )
                 elif sdk_stop == "model_context_window_exceeded":
-                    await request_ctx.emit_delta("\n\n⚠️ Context window exceeded.")
+                    await request_ctx.note("\n\n⚠️ Context window exceeded.")
                 elif sdk_stop == "refusal":
                     _stop_details = getattr(sdk_final_message, "stop_details", None)
                     _category = getattr(_stop_details, "category", None) if _stop_details else None
@@ -321,7 +321,10 @@ class PipeStreamRuntimeSupportMethods:
                     _ref_msg = f"\u26a0\ufe0f Request declined by Claude ({_cat_label})."
                     if _explanation:
                         _ref_msg += f"\n\n_{_explanation}_"
-                    await request_ctx.emit_block(_ref_msg)
+                    if request_ctx.items is not None:
+                        await request_ctx.note("\n\n" + _ref_msg)
+                    else:
+                        await request_ctx.emit_block(_ref_msg)
         elif not sdk_content:
             logger.warning(
                 f"⚠️ Empty API response (no stop_reason, no content). "
@@ -330,7 +333,7 @@ class PipeStreamRuntimeSupportMethods:
             )
             conversation_ended = True
             if tool_loop_iteration > 1:
-                await request_ctx.emit_delta(
+                await request_ctx.note(
                     "\n\n⚠️ Code execution continuation returned empty response. "
                     "The container may have timed out."
                 )
@@ -563,44 +566,49 @@ class PipeStreamRuntimeSupportMethods:
         """
         blocks = []
         for block in message.content:
-            block_dict = block.model_dump(exclude_none=True)
-            block_type = block_dict.get("type", "")
-
-            # Skip structural meta-events (not real content blocks)
-            if block_type in self._SKIP_BLOCK_TYPES:
-                continue
-
-            # Compaction: preserve as {type: "compaction"} so the API
-            # recognises the boundary and drops all prior content blocks.
-            if block_type == "compaction":
-                content = block_dict.get("content", "")
-                if content:
-                    blocks.append({"type": "compaction", "content": content})
-                continue
-
-            # Thinking/redacted_thinking: strict key sanitization
-            sanitize_keys = self._SANITIZE_BLOCK_KEYS.get(block_type)
-            if sanitize_keys is not None:
-                blocks.append({k: v for k, v in block_dict.items() if k in sanitize_keys})
-                continue
-
-            # Text blocks: strip citations (response-only presentation data)
-            if block_type == "text":
-                block_dict.pop("citations", None)
+            block_dict = self._api_block(block)
+            if block_dict is not None:
                 blocks.append(block_dict)
-                continue
-
-            # Strip a "direct" caller from every block: the API rejects it on
-            # tool_use, and replay rebuilds *_tool_result blocks without it, so
-            # keeping it here breaks the cache prefix on the next turn. A
-            # programmatic caller stays (needed for code_execution routing).
-            caller = block_dict.get("caller")
-            if isinstance(caller, dict) and caller.get("type") == "direct":
-                block_dict.pop("caller", None)
-
-            # All other blocks (tool_use, server_tool_use, *_tool_result, etc.):
-            # pass through as-is to preserve thinking block positions
-            blocks.append(block_dict)
-
         return blocks
+
+    def _api_block(self, block) -> Optional[dict]:
+        """One SDK content block as the API takes it back, or None for meta-events.
+
+        Shared by the tool loop and the output items, so a block reads the same
+        whether it is replayed mid-turn or from OpenWebUI on the next turn.
+        """
+        block_dict = block.model_dump(exclude_none=True)
+        block_type = block_dict.get("type", "")
+
+        # Skip structural meta-events (not real content blocks)
+        if block_type in self._SKIP_BLOCK_TYPES:
+            return None
+
+        # Compaction: preserve as {type: "compaction"} so the API
+        # recognises the boundary and drops all prior content blocks.
+        if block_type == "compaction":
+            content = block_dict.get("content", "")
+            return {"type": "compaction", "content": content} if content else None
+
+        # Thinking/redacted_thinking: strict key sanitization
+        sanitize_keys = self._SANITIZE_BLOCK_KEYS.get(block_type)
+        if sanitize_keys is not None:
+            return {k: v for k, v in block_dict.items() if k in sanitize_keys}
+
+        # Text blocks: strip citations (response-only presentation data)
+        if block_type == "text":
+            block_dict.pop("citations", None)
+            return block_dict
+
+        # Strip a "direct" caller from every block: the API rejects it on
+        # tool_use, and replay rebuilds *_tool_result blocks without it, so
+        # keeping it here breaks the cache prefix on the next turn. A
+        # programmatic caller stays (needed for code_execution routing).
+        caller = block_dict.get("caller")
+        if isinstance(caller, dict) and caller.get("type") == "direct":
+            block_dict.pop("caller", None)
+
+        # All other blocks (tool_use, server_tool_use, *_tool_result, etc.):
+        # pass through as-is to preserve thinking block positions
+        return block_dict
 

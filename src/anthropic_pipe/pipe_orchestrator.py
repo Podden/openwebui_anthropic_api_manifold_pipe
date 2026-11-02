@@ -20,6 +20,95 @@ class PipeOrchestratorMethods:
         __request__: Optional[Any] = None,
         __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
     ):
+        """OpenWebUI entry point.
+
+        In a chat on OpenWebUI >= 0.12.2 the answer streams as output items:
+        pipe() returns their event generator, and OpenWebUI renders and stores
+        the message from it (shared/output_items.py). Task models, API clients,
+        channels, sub-agents and older OpenWebUI get text as before.
+        """
+        args = dict(
+            body=body, __user__=__user__, __event_emitter__=__event_emitter__, __metadata__=__metadata__,
+            __tools__=__tools__, __files__=__files__, __task__=__task__, __task_body__=__task_body__,
+            __request__=__request__, __event_call__=__event_call__,
+        )
+        self._start_legacy_migration(str(body.get("model") or ""))
+        if not self._streams_items(body, __event_emitter__, __metadata__, __task__, __request__):
+            logger.debug("pipe(): text mode")
+            return await self._pipe_run(**args)
+        logger.debug("pipe(): output item mode")
+        items = ItemStream()
+        return self._item_events(items, self._pipe_run(**args, __items__=items))
+
+    @staticmethod
+    def _streams_items(body: dict, event_emitter: Any, metadata: Optional[dict], task: Any, request: Any) -> bool:
+        """Whether OpenWebUI will consume output item events from this call.
+
+        Its middleware applies them only when it built an event emitter, i.e. for
+        a chat_id + message_id; without one the stream goes to the client raw.
+        body["tools"] does not matter: OpenWebUI fills it in every chat with
+        tools (native function calling), and it only runs function_call items
+        that have no output, which the item stream never leaves behind.
+        """
+        metadata = metadata or {}
+        chat_id = str(metadata.get("chat_id") or "")
+        internal = request is not None and getattr(getattr(request, "state", None), "internal", False) is True
+        return bool(
+            body.get("stream", True)
+            and event_emitter is not None
+            and not task
+            and chat_id
+            and metadata.get("message_id")
+            and not chat_id.startswith("channel:")
+            and not internal
+            and not _owui_version_below((0, 12, 2))
+        )
+
+    async def _item_events(self, items: Any, run: Any):
+        """Yield the item events while the pipe runs; stopping the stream cancels the run."""
+        task = asyncio.ensure_future(run)
+        try:
+            while not (task.done() and items.queue.empty()):
+                getter = asyncio.ensure_future(items.queue.get())
+                done, _ = await asyncio.wait({getter, task}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    yield getter.result()
+                else:
+                    getter.cancel()
+            failed = ""
+            try:
+                result = task.result()
+            except Exception as e:
+                # Calls left in_progress count as pending for OpenWebUI's
+                # "continue", which would run them itself: close them first.
+                self.logger.exception("Pipe run failed while streaming items")
+                result, failed = None, "error"
+                items.note(f"\n\nError: {e}")
+            # An early return (missing API key, ...) streamed nothing: show its text.
+            if not items.items and isinstance(result, str) and result.strip():
+                items.note(result)
+            items.finish(failed)
+            items.completed(items.usage)
+            while not items.queue.empty():
+                yield items.queue.get_nowait()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    async def _pipe_run(
+        self,
+        body: dict[str, Any],
+        __user__: Dict[str, Any],
+        __event_emitter__: Callable[[Dict[str, Any]], Awaitable[None]],
+        __metadata__: dict[str, Any] = {},
+        __tools__: Optional[Dict[str, Dict[str, Any]]] = None,
+        __files__: Optional[Dict[str, Any]] = None,
+        __task__: Optional[dict[str, Any]] = None,
+        __task_body__: Optional[dict[str, Any]] = None,
+        __request__: Optional[Any] = None,
+        __event_call__: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
+        __items__: Any = None,
+    ):
         """
         OpenWebUI Claude streaming pipe with integrated streaming logic.
         """
@@ -27,6 +116,7 @@ class PipeOrchestratorMethods:
         # PHASE 1: RESPONSE ACCUMULATION STATE
         # =========================================================================
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
+        request_ctx.items = __items__
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
         emit_message_delta = request_ctx.emit_delta
@@ -311,6 +401,9 @@ class PipeOrchestratorMethods:
             # Continues until conversation ends or max tool calls reached
             # =========================================================================
             tool_loop_iteration = 0
+            # Where this turn starts in the request; with output items the tool
+            # loop rebuilds everything after it from the items (see below).
+            items_base = len(payload_for_stream["messages"])
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -360,6 +453,8 @@ class PipeOrchestratorMethods:
                         if payload_for_stream.get("speed") == "fast"
                         else client
                     )
+                    if request_ctx.items is not None:
+                        request_ctx.items.begin_response()
                     async with _stream_client.beta.messages.stream(
                         **payload_for_stream
                     ) as stream:
@@ -490,13 +585,21 @@ class PipeOrchestratorMethods:
                                     if delta_container_id:
                                         current_container_id = payload_for_stream.get("container")
                                         if current_container_id != delta_container_id:
-                                            text_state.chunk += self._create_metadata_marker(
+                                            _container_marker = self._create_metadata_marker(
                                                 "container_id",
                                                 delta_container_id,
                                                 messagenum=len(
                                                     payload_for_stream.get("messages", [])
                                                 ),
                                             )
+                                            if request_ctx.items is not None:
+                                                # Mid-turn text would land in the tool loop's
+                                                # request; the end-of-turn marker carries it.
+                                                if not isinstance(new_marker_metadata, list):
+                                                    new_marker_metadata = list(new_marker_metadata or [])
+                                                new_marker_metadata.append(_container_marker)
+                                            else:
+                                                text_state.chunk += _container_marker
                                             logger.debug(
                                                 f"📦 Container ID from message_delta: {delta_container_id}"
                                             )
@@ -621,6 +724,8 @@ class PipeOrchestratorMethods:
                                                 if is_error:
                                                     result_block["is_error"] = True
                                                 tool_calls.append(result_block)
+                                                if request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(tool_use_id, result_block, result_str)
 
                                                 if server_tool_state.in_code_execution:
                                                     # Accumulate for unified code execution display
@@ -678,6 +783,8 @@ class PipeOrchestratorMethods:
                                                         "is_error": True,
                                                     }
                                                 )
+                                                if request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(tool_use_id, tool_calls[-1], error_result)
                                                 completed = self._format_tool_result_block(
                                                     tool_use_id,
                                                     "unknown",
@@ -710,11 +817,15 @@ class PipeOrchestratorMethods:
                                     # problem that was never there. Name the
                                     # limit so it diagnoses itself.
                                     _cap = payload_for_stream.get("max_tokens")
-                                    text_state.chunk += (
+                                    _cut_note = (
                                         "\n\n⚠️ Response cut off: the model hit its output limit"
                                         + (f" (max_tokens = {_cap:,})" if _cap else "")
                                         + ". This is not the context window — raise max_tokens for this model."
                                     )
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note(_cut_note)
+                                    else:
+                                        text_state.chunk += _cut_note
                                     # Without this the loop falls through to the
                                     # truncated-stream retry below and replays
                                     # the whole request MAX_RETRIES times, each
@@ -745,13 +856,22 @@ class PipeOrchestratorMethods:
                                     if _explanation:
                                         _ref_msg += f"\n\n_{_explanation}_"
                                     logger.info(f"\U0001f6ab Refusal: category={_category!r} explanation={len(_explanation or '')}c")
-                                    text_state.chunk += _ref_msg
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note(_ref_msg)
+                                    else:
+                                        text_state.chunk += _ref_msg
                                     conversation_ended = True
                                 elif stop_reason == "stop_sequence":
-                                    text_state.chunk += "Claude stopped generating based on stop sequence."
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note("Claude stopped generating based on stop sequence.")
+                                    else:
+                                        text_state.chunk += "Claude stopped generating based on stop sequence."
                                     conversation_ended = True
                                 elif stop_reason == "model_context_window_exceeded":
-                                    text_state.chunk += "Claude has reached the maximum context window for this model."
+                                    if request_ctx.items is not None:
+                                        await request_ctx.note("Claude has reached the maximum context window for this model.")
+                                    else:
+                                        text_state.chunk += "Claude has reached the maximum context window for this model."
                                     conversation_ended = True
                                 elif stop_reason == "compaction":
                                     # Compaction triggered — response contains only the compaction block.
@@ -798,6 +918,8 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                    if request_ctx.items is not None:
+                        request_ctx.items.end_response()
                     # Log stream event diagnostics
                     logger.debug(f"📊 Stream events: {stream_event_counts}")
 
@@ -883,7 +1005,7 @@ class PipeOrchestratorMethods:
                                     },
                                 }
                             )
-                            await emit_message_delta(
+                            await request_ctx.note(
                                 f"\n\n⚠️ **Tool call limit reached** ({current_function_calls}/{max_function_calls}). Some tool results may not have been processed. You can increase the limit in the model's valve settings."
                             )
                             break
@@ -981,6 +1103,21 @@ class PipeOrchestratorMethods:
                                         )
 
                         # Ensure we added at least one message, otherwise break the loop
+                        if request_ctx.items is not None:
+                            for missing_id in request_ctx.items.open_client_calls():
+                                missing = "Error: tool execution failed - no result was produced"
+                                request_ctx.items.tool_result(
+                                    missing_id,
+                                    {"type": "tool_result", "tool_use_id": missing_id, "content": missing, "is_error": True},
+                                    missing,
+                                )
+                            # The next request takes this turn from the output items, the
+                            # way the next turn's replay will: both send the same bytes,
+                            # so the cache prefix written now still matches then.
+                            payload_for_stream["messages"][items_base:] = rebuild_run(
+                                owui_messages(request_ctx.items.items)
+                            )
+
                         if not assistant_content and not user_content:
                             logger.debug(
                                 f"🔧 No valid content to add, ending conversation"
@@ -1060,6 +1197,10 @@ class PipeOrchestratorMethods:
                                 payload_for_stream["messages"].append(
                                     {"role": "assistant", "content": assistant_content}
                                 )
+                        if request_ctx.items is not None:
+                            payload_for_stream["messages"][items_base:] = rebuild_run(
+                                owui_messages(request_ctx.items.items)
+                            )
                         has_pending_tool_calls = False
                         sdk_final_message = None
                         text_state.reset_for_iteration()
@@ -1104,13 +1245,15 @@ class PipeOrchestratorMethods:
                             request_ctx.state.reset_current_block()
                             # payload_for_stream stays unchanged → same messages, same tools
                             # Cache from previous messages is preserved server-side
+                            if request_ctx.items is not None:
+                                request_ctx.items.rollback()
                             continue
                         else:
                             logger.error(
                                 f"❌ Truncated stream: max retries ({self.valves.MAX_RETRIES}) exhausted. "
                                 f"Returning error to user."
                             )
-                            await request_ctx.emit_delta(
+                            await request_ctx.note(
                                 "\n\n⚠️ Die Anthropic API hat den Stream mehrfach abgebrochen "
                                 f"({self.valves.MAX_RETRIES} Versuche). Bitte versuche es erneut."
                             )
@@ -1155,6 +1298,8 @@ class PipeOrchestratorMethods:
                         if "thinking-binding-controls-2026-08-01" not in _betas:
                             _betas.append("thinking-binding-controls-2026-08-01")
                         payload_for_stream["betas"] = _betas
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
                     # An org admin can switch web fetch off in the Claude Console;
                     # every request that still carries the tool then 400s ("web
@@ -1179,6 +1324,8 @@ class PipeOrchestratorMethods:
                             "answering without it. Turn off the WEB_FETCH valve to skip this retry.",
                             type="warning",
                         )
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
                     # Fast mode rate-limited (or not enabled for the org, limit 0):
                     # retry at standard speed as the fast-mode docs recommend. The
@@ -1196,6 +1343,8 @@ class PipeOrchestratorMethods:
                             "falling back to standard speed.",
                             type="warning",
                         )
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
                     # Finalize any open live code_exec block before handling error, so it
                     # does not stay stuck mid-render behind the error message.
@@ -1207,8 +1356,12 @@ class PipeOrchestratorMethods:
                         request_ctx=request_ctx,
                     )
                     if should_retry:
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
                         continue
                     if response_suffix:
+                        if request_ctx.items is not None:
+                            await request_ctx.note(response_suffix)
                         return final_text() + response_suffix
                     return final_text()
         except asyncio.CancelledError:
@@ -1432,7 +1585,7 @@ class PipeOrchestratorMethods:
                             _already,
                             all_request_ids,
                         )
-                    await request_ctx.emit_delta(diag_block)
+                    await request_ctx.note(diag_block)
             except Exception as e:
                 logger.warning(f"[CACHE-DIAG] failed to emit diagnostics block: {e}")
 
@@ -1441,7 +1594,9 @@ class PipeOrchestratorMethods:
         # is stripped from future prompts by _extract_metadata_marker_from_message.
         if new_marker_metadata and not is_internal:
             marker_text = "".join(new_marker_metadata) if isinstance(new_marker_metadata, list) else str(new_marker_metadata)
-            if marker_text:
+            if marker_text and request_ctx.items is not None:
+                await request_ctx.note(marker_text)
+            elif marker_text:
                 final_message.append(marker_text)
                 logger.debug("Persisted %d metadata marker char(s)", len(marker_text))
 
@@ -1475,7 +1630,10 @@ class PipeOrchestratorMethods:
         # chat:completion events are NOT persisted by the socket event emitter
         # (only status|message|replace|embeds|files|source are), so without this
         # direct DB write the analytics tab never sees our token counts.
-        if include_usage and total_usage and CHATS_AVAILABLE and __metadata__:
+        if request_ctx.items is not None:
+            # Goes out with response.completed; OpenWebUI stores it with the message.
+            request_ctx.items.usage = self._public_usage(total_usage) if include_usage and total_usage else {}
+        elif include_usage and total_usage and CHATS_AVAILABLE and __metadata__:
             chat_id = __metadata__.get("chat_id")
             message_id = __metadata__.get("message_id")
             if chat_id and message_id and not str(chat_id).startswith("local:"):

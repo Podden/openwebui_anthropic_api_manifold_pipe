@@ -68,6 +68,8 @@ class HandlerRegistry:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None)
         ctx.state.tool_use.current_block_type = block_type
+        if ctx.items is not None:
+            ctx.items.on_start(event)
         return await self.for_block_type(block_type).on_start(event, ctx)
 
     async def handle_delta(self, event: Any, ctx: Any) -> bool:
@@ -76,6 +78,8 @@ class HandlerRegistry:
         Delta events carry no content_block of their own, which is why the start
         event has to stash the type.
         """
+        if ctx.items is not None:
+            ctx.items.on_delta(event)
         return await self.for_block_type(ctx.state.tool_use.current_block_type).on_delta(event, ctx)
 
     async def handle_stop(self, event: Any, ctx: Any) -> bool:
@@ -87,6 +91,8 @@ class HandlerRegistry:
         block = getattr(event, "content_block", None)
         block_type = getattr(block, "type", None) or ctx.state.tool_use.current_block_type
         handled = await self.for_block_type(block_type).on_stop(event, ctx)
+        if ctx.items is not None:
+            ctx.items.on_stop(event, ctx.pipe._api_block(block) if block is not None else None)
         # A block's last progress re-render may only have been shown; store it.
         await ctx.flush_replace()
         ctx.state.reset_current_block()

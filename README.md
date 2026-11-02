@@ -6,8 +6,8 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.10.3`
-- **Recommended OpenWebUI:** `0.11+` (works from `0.9.0+`)
+- **Current pipe version:** `0.11.0`
+- **Recommended OpenWebUI:** `0.12.2+` (answers stream as native output items; older versions from `0.9.0+` keep the text path)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.0`, `pillow-heif>=0.18.0`
 - **Anthropic API version:** `2026-10-21`
@@ -94,6 +94,9 @@ Recent OpenWebUI releases matter for this pipe:
 - **0.12.3**
    - OpenWebUI's own Tool Search (Admin → Interface) holds large tools back behind `search_tools` / `call_tool`. With `ENABLE_TOOL_SEARCH` on, Claude's native tool search replaces it; with it off, OpenWebUI's Tool Search runs and the pipe resolves `call_tool` in its tool loop
 
+- **0.12.2**
+   - pipes can stream OpenWebUI output items with provider data (`provider_function`, `reasoning_details`) that come back on the next turn. From pipe 0.11.0 on, answers stream this way: thinking, tool calls and server tools render natively and the prompt cache holds across them
+
 If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.9.0+` moved DB/model helpers to async. The pipe is already migrated, but custom additions must also follow the async model/helper rules. See the official migration guide: https://docs.openwebui.com/features/extensibility/plugin/migration/to-0.9.0
 
 ---
@@ -108,6 +111,7 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom base URL / proxy (Azure, `aws-external-anthropic`, gateways) |
 | `ENABLED_MODELS` | `""` | Comma-separated model IDs to expose. Bypasses `/v1/models` auto-discovery — needed for endpoints without a models API |
 | `ANTHROPIC_WORKSPACE_ID` | `""` | Experimental: "Claude on AWS" workspace ID, sent as the `anthropic-workspace-id` header |
+| `LEGACY_CHAT_MIGRATION` | `dry-run` | One-time upgrade of chats written before pipe 0.11 to output items. `dry-run` counts and writes `anthropic_pipe_legacy_migration_*.dryrun.json` to OpenWebUI's data directory, `on` converts (one write per chat), `off` skips. Each mode runs once; delete its file to run it again. Turns that carried the cache-diagnostics block or adjacent text blocks miss the prompt cache once |
 | `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` tier on Opus models that support it (Opus 5.5 / 5; up to ~2.5x faster, higher cost). Per message: Fast Mode Toggle |
 | `REFUSAL_FALLBACK` | `off` | Retry a safety-refused request server-side: `off`, `default` (Anthropic's per-category recommendation), or a pinned model. Claude API only; skipped for Haiku 5.5, which has no server-side fallback |
 | `ENABLE_INTERLEAVED_THINKING` | `true` | Allows thinking blocks between tool calls where supported |
@@ -236,6 +240,15 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.0`
+_Streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path._
+- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
+- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
+- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
+- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
+- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
+- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
+
 ### `v0.10.3`
 - Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
 - Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
