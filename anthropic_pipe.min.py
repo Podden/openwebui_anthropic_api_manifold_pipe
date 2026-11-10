@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.0
+version: 0.11.1
 license: MIT
-requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -32,11 +32,27 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5.5 / 5
+- Fast Mode for Fable 5.2 and Opus 5.5 / 5
+- Message threads for tool loops (beta, optional)
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.1
+- Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
+- Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
+- New valve ENABLE_MESSAGE_THREADS (beta, off by default): inside a tool loop the pipe sends only the new tool results instead of the whole conversation on every request, so requests get smaller. Measured with about 25k tokens of context it is not faster, and after a web search the next request writes the search result to the cache again (an API-side miss, reported to Anthropic), so it stays off unless your loops are long and search-free. Anthropic holds the conversation in memory for up to an hour (not eligible for zero data retention). Not used together with compaction; any thread error falls back to full requests.
+- OpenWebUI 0.13 puts the skill list, memories and attached knowledge after the user's message as hidden tool results. The pipe took that tool result for the user's message: retrieved file context (RAG) ended up inside the cached prefix, so every follow-up in a chat with files re-wrote the conversation instead of reading it from the prompt cache, and a newly attached full-context file was placed on the tool result. Both now go by the message the user wrote. OpenWebUI 0.12 behaves as before.
+- OpenWebUI 0.13: Tool Call Labels show on the pipe's tool calls, and the label and approval fields OpenWebUI adds to tool schemas no longer reach the tool. Tool permission mode "Auto" is honoured: a tool runs unasked only when the model marks the call as needing no approval, otherwise the pipe asks.
+- The chat migration from 0.11.0 (LEGACY_CHAT_MIGRATION) stopped with an error on OpenWebUI 0.12.4 and newer, which renamed a database call; neither the dry run nor `on` did anything there. It runs again; chatting was not affected.
+- OpenWebUI 0.13.1 Tool Search: `call_tool` now takes a batch (`calls`: list of tool_name + params). The pipe only knew the single-call form, so every deferred tool failed with "call_tool requires tool_name and params". The calls run in order; each shows as its own tool with its own result and card, as in OpenWebUI's own loop, while the API gets one call with one combined result, so the replay and the prompt cache are unchanged. OpenWebUI 0.13.0 and older keep the single-call form.
+- Tool Rich UI (HTML cards such as a weather widget) shows again in chats with output items: the embeds and files a tool returns now sit on its result item, as OpenWebUI's own connections store them. Since 0.11.0 they were dropped there.
+- OpenWebUI Tool Search: the call shows as the tool it ran (e.g. get_weather) instead of a hidden call_tool, like OpenWebUI's own loop; the replay still sends the API's call_tool.
+- Tool calls carry started_at / ended_at / duration. OpenWebUI's Stop handling uses them to tell "outcome unknown" from "not executed", its analytics show the time.
+- Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
+- Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
+- Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
+
 v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
 - Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
 - The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
@@ -52,11 +68,6 @@ v0.10.3
 - A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
 - Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
 - Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
-
-v0.10.2
-- Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
-- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
-- The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
 
 """
 
@@ -222,6 +233,10 @@ SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "anthropic_pipe_tool_approval", default=("full", None)
+)
+
+TOOL_STARTED: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
+    "anthropic_pipe_tool_started", default=None
 )
 
 PATTERN_CODE_INTERPRETER_DETAILS = re.compile(
@@ -1058,7 +1073,7 @@ async def create_request_payload(
         getattr(pipe.valves, "ENABLE_CACHE_DIAGNOSTICS", False)
         and pipe.valves.CACHE_CONTROL != "cache disabled"
     ):
-        beta_headers.append("cache-diagnosis-2026-04-07")
+
         chat_id_for_diag = __metadata__.get("chat_id") if __metadata__ else None
 
         previous_message_id = None
@@ -1493,6 +1508,7 @@ class StatusEmitter:
     def __init__(self, emit_event: Callable[[dict[str, Any]], Awaitable[None]]):
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._sources: dict[str, Any] | None = None
 
     async def emit(
         self,
@@ -1529,13 +1545,8 @@ class StatusEmitter:
     async def web_search_done(self, urls: list[str], query: str = "") -> None:
         if not urls:
             return
-        await self.emit(
-            "Searched {{count}} sites",
-            action="web_search",
-            urls=urls,
-            query=query,
-            count=len(urls),
-        )
+        self._sources = {"action": "web_search", "urls": urls, "query": query, "count": len(urls)}
+        await self.emit("Searched {{count}} sites", **self._sources)
 
     async def fetching_url(self, url: str = "") -> None:
         await self.emit(f"🌐 Fetching {url}" if url else "🌐 Fetching URL...")
@@ -1566,6 +1577,17 @@ class StatusEmitter:
 
     async def complete(self, description: str) -> None:
         await self.emit(description, done=True, force=True)
+
+    async def complete_quietly(self, history: list | None = None) -> None:
+        lasting = [e for e in history or [] if isinstance(e, dict) and not e.get("hidden")
+                   and (e.get("done") or e.get("action") == "web_search")]
+        last = lasting[-1] if lasting else (
+            {"description": "Searched {{count}} sites", **self._sources} if self._sources else None)
+        if last:
+            fields = {k: v for k, v in last.items() if k not in ("description", "done", "hidden")}
+            await self.emit(last.get("description", ""), done=True, force=True, **fields)
+        else:
+            await self.emit("", done=True, hidden=True, force=True)
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
         await self._emit_event(
@@ -1711,6 +1733,48 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
         return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
     return name, params, None
 
+def _owui_call_tool_batch(tool_input: Any) -> list | None:
+    if isinstance(tool_input, dict) and "calls" in tool_input:
+        return tool_input["calls"] if set(tool_input) == {"calls"} and isinstance(tool_input["calls"], list) else []
+    return None
+
+class OwuiToolBatch(list):
+
+    def combined(self, texts: list) -> str:
+        return json.dumps(
+            {"results": [{"tool_name": e["tool_name"], "status": e["status"], "output": t}
+                         for e, t in zip(self, texts)]},
+            ensure_ascii=False,
+        )
+
+async def _run_owui_call_tool_batch(entries: list, tools: dict) -> Any:
+    if not entries:
+        return "Error: call_tool requires a non-empty calls array."
+    if any(not isinstance(e, dict) or set(e) != {"tool_name", "params"} for e in entries):
+        return "Error: Each call requires tool_name and params."
+    batch = OwuiToolBatch()
+    for entry in entries:
+        name, params, error = _resolve_owui_call_tool(entry, tools)
+        tool = tools.get(name) or {}
+        params, labels, _approval = split_owui_call_metadata(params)
+        result = {"tool_name": name if not error else entry["tool_name"],
+                  "arguments": params if isinstance(params, dict) else {},
+                  "labels": labels if tool.get("display_labels") else None,
+                  "started_at": time.time()}
+        if error or not tool.get("callable"):
+            result.update(status="failed", output=error or f'Error: Tool "{name}" cannot run here.')
+        else:
+            try:
+                output = await tool["callable"](**_filter_tool_args(tool, params))
+                if isinstance(output, tuple) and output:
+                    output = output[0]
+                result.update(status="completed", output=output)
+            except Exception as e:
+                result.update(status="failed", output=f"Error: {e}")
+        result["ended_at"] = time.time()
+        batch.append(result)
+    return batch
+
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     tool_use = ctx.state.tool_use
     server_tool = ctx.state.server_tool
@@ -1813,11 +1877,41 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         tool_input = tool_call_data.get("input", {})
 
         call_tool_error = None
+        call_tool_batch = None
         if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
-            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+            call_tool_batch = _owui_call_tool_batch(tool_input)
+            if call_tool_batch is not None and len(call_tool_batch) == 1:
+                tool_input, call_tool_batch = call_tool_batch[0], None
+            if call_tool_batch and getattr(ctx, "items", None) is not None:
+
+                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools)
+                if not first_error:
+                    first_params, _labels, _approval = split_owui_call_metadata(first_params)
+                    ctx.items.dispatched(tool_call_data.get("id"), first, first_params)
+            if call_tool_batch is None:
+                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+                if not call_tool_error and getattr(ctx, "items", None) is not None:
+                    ctx.items.dispatched(tool_call_data.get("id"), tool_name, tool_input)
 
         tool = tools.get(tool_name) if tools else None
-        if call_tool_error:
+
+        if isinstance(tool, dict) and (tool.get("display_labels") or tool.get("approval_review")):
+            tool_input, labels, approval_required = split_owui_call_metadata(tool_input)
+            if tool_call_data.get("name") == tool_name:
+                tool_call_data["input"] = tool_input
+            if tool.get("approval_review"):
+                tool_call_data["approval_required"] = approval_required is not False
+            if labels and tool.get("display_labels") and getattr(ctx, "items", None) is not None:
+                ctx.items.call_labels(tool_call_data.get("id"), labels, tool_input)
+
+        if call_tool_batch is not None:
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(
+                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools)
+                )
+            )
+            running_tool_tasks.append(task)
+        elif call_tool_error:
 
             async def call_tool_error_result(message=call_tool_error):
                 return message
@@ -2641,6 +2735,20 @@ class ModelPricing:
 
     RATES = {
 
+        "claude-fable-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
+        "claude-mythos-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
         "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-fable-5": {"input": 10.0, "output": 50.0},
@@ -2913,6 +3021,26 @@ def result_summary(block: dict) -> str:
 def display_text(text: str) -> str:
     return _DATA_IMAGE.sub("[image]", text or "")
 
+OWUI_CALL_METADATA = ("__labels__", "__approval__")
+
+def split_owui_call_metadata(tool_input: Any) -> tuple[Any, Optional[dict], Optional[bool]]:
+    if not isinstance(tool_input, dict) or not any(k in tool_input for k in OWUI_CALL_METADATA):
+        return tool_input, None, None
+    arguments = {k: v for k, v in tool_input.items() if k not in OWUI_CALL_METADATA}
+    labels = tool_input.get("__labels__")
+    if isinstance(labels, dict) and all(
+        isinstance(labels.get(k), str) and 0 < len(labels[k].strip()) <= 120 for k in ("running", "completed")
+    ):
+        labels = {k: labels[k].strip() for k in ("running", "completed")}
+    else:
+        labels = None
+    required = None
+    if "__approval__" in tool_input:
+        approval = tool_input["__approval__"]
+        valid = isinstance(approval, dict) and set(approval) == {"required"} and type(approval["required"]) is bool
+        required = approval["required"] if valid else True
+    return arguments, labels, required
+
 class _StoredBlock:
 
     def __init__(self, block: dict) -> None:
@@ -3080,10 +3208,13 @@ class ItemStream:
             call["use"] = api_block
             item = self.items[entry[1]]
             if api_block is not None:
-                item["arguments"] = json.dumps(api_block.get("input", {}), ensure_ascii=False)
+
+                if "display_labels" not in item and "api_name" not in call:
+                    item["arguments"] = json.dumps(api_block.get("input", {}), ensure_ascii=False)
 
                 payload = {"v": 1, "use": api_block, **({"after_client": True} if call["after_client"] else {})}
-                item["provider_function"] = {"name": item["name"], "arguments": {ANTHROPIC_KEY: payload}}
+                item["provider_function"] = {"name": call.get("api_name", item["name"]),
+                                             "arguments": {ANTHROPIC_KEY: payload}}
             self._done(entry[1])
         elif kind == "other" and api_block is not None:
             use_id = api_block.get("tool_use_id")
@@ -3097,11 +3228,69 @@ class ItemStream:
         self.on_start(event)
         self.on_stop(event, block)
 
-    def tool_result(self, call_id: str, result_block: dict, text: str) -> None:
-        if call_id in self._calls:
-            self._finish_call(call_id, result_block, display_text(text))
+    def call_labels(self, call_id: str, labels: dict, arguments: Any) -> None:
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        item["display_labels"] = labels
+        item["arguments"] = json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False)
+        self._done(call["idx"])
 
-    def _finish_call(self, call_id: str, result: Optional[dict], text: str, status: str = "completed") -> None:
+    def dispatched(self, call_id: str, name: str, arguments: Any) -> None:
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        call.setdefault("api_name", item["name"])
+        item.update(name=name, hidden=False,
+                    arguments=json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False))
+        if "provider_function" in item:
+            item["provider_function"]["name"] = call["api_name"]
+        self._done(call["idx"])
+
+    def started(self, call_id: str) -> None:
+        call = self._calls.get(call_id)
+        if call is not None and "started_at" not in self.items[call["idx"]]:
+            self.items[call["idx"]]["started_at"] = time.time()
+            self._done(call["idx"])
+
+    def tool_result(self, call_id: str, result_block: dict, text: str,
+                    files: Optional[list] = None, embeds: Optional[list] = None) -> None:
+        if call_id in self._calls:
+            self._finish_call(call_id, result_block, display_text(text), files=files, embeds=embeds)
+
+    def batch_result(self, call_id: str, result_block: dict, shown: list) -> None:
+        if call_id not in self._calls or not shown:
+            return
+        members = []
+        for entry in shown[1:]:
+            member_id = _new_id("call")
+            item = {"id": _new_id("fc"), "type": "function_call", "call_id": member_id, "name": entry["name"],
+                    "arguments": json.dumps(entry["arguments"], ensure_ascii=False), "status": entry["status"],
+                    "hidden": False, "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                    "duration": round(entry["ended_at"] - entry["started_at"], 3),
+                    "provider_function": {"name": entry["name"],
+                                          "arguments": {ANTHROPIC_KEY: {"v": 1, "batch_of": call_id}}}}
+            if entry.get("labels"):
+                item["display_labels"] = entry["labels"]
+            self._done(self._add(item))
+            members.append((member_id, entry))
+        first = shown[0]
+        if first.get("labels"):
+            self.items[self._calls[call_id]["idx"]]["display_labels"] = first["labels"]
+
+        self._finish_call(call_id, dict(result_block), display_text(first["text"]), status=first["status"],
+                          files=first.get("files"), embeds=first.get("embeds"))
+        for member_id, entry in members:
+            self._done(self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": member_id,
+                                  "status": "completed",
+                                  "output": [{"type": "input_text", "text": display_text(entry["text"])}],
+                                  **({"files": entry["files"]} if entry.get("files") else {}),
+                                  **({"embeds": entry["embeds"]} if entry.get("embeds") else {})}))
+
+    def _finish_call(self, call_id: str, result: Optional[dict], text: str, status: str = "completed",
+                     files: Optional[list] = None, embeds: Optional[list] = None) -> None:
         call = self._calls.pop(call_id)
         item = self.items[call["idx"]]
 
@@ -3122,10 +3311,14 @@ class ItemStream:
         if call.get("after_client"):
             payload["after_client"] = True
         item["status"] = status
-        item["provider_function"] = {"name": item["name"], "arguments": {ANTHROPIC_KEY: payload}}
+        if "started_at" in item:
+            item["ended_at"] = time.time()
+            item["duration"] = round(item["ended_at"] - item["started_at"], 3)
+        item["provider_function"] = {"name": call.get("api_name", item["name"]), "arguments": {ANTHROPIC_KEY: payload}}
         self._done(call["idx"])
         out = self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": call_id,
-                         "status": "completed", "output": [{"type": "input_text", "text": text}]})
+                         "status": "completed", "output": [{"type": "input_text", "text": text}],
+                         **({"files": files} if files else {}), **({"embeds": embeds} if embeds else {})})
         self._done(out)
 
     def _inline(self, block: dict) -> None:
@@ -3315,6 +3508,132 @@ def rebuild_run(messages: list[dict]) -> list[dict]:
         out.append({"role": "assistant", "content": carry})
     return _clone(out)
 
+MESSAGE_THREADS_BETA = "message-threads-2026-08-12"
+
+def _without_cache_control(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+def _fingerprint(messages: list) -> list[str]:
+    return [
+        json.dumps(_without_cache_control(m), sort_keys=True, default=str, ensure_ascii=False)
+        for m in messages
+    ]
+
+class MessageThread:
+    def __init__(self) -> None:
+        self.enabled = True
+        self.threaded = False
+        self._previous_id: Optional[str] = None
+        self._stored: list[str] = []
+        self._pending: list[str] = []
+
+    @staticmethod
+    def supports(payload: dict) -> bool:
+        return "context_management" not in payload and "context_management" not in (
+            payload.get("extra_body") or {}
+        )
+
+    def request(self, payload: dict) -> dict:
+        self.threaded = False
+        if not self.enabled or not self.supports(payload):
+            return payload
+        messages = payload.get("messages") or []
+        fingerprints = _fingerprint(messages)
+        stored = len(self._stored)
+        continues = (
+            self._previous_id is not None
+            and len(messages) > stored
+            and fingerprints[:stored] == self._stored
+
+            and messages[stored].get("role") == "assistant"
+        )
+        if continues:
+            request = {k: v for k, v in payload.items() if k not in ("system", "tools")}
+            request["messages"] = self._cached_tail(messages, stored + 1)
+            thread = {"type": "continue", "previous_message_id": self._previous_id}
+        else:
+            request = dict(payload)
+            thread = {"type": "create"}
+        betas = list(payload.get("betas") or [])
+        if MESSAGE_THREADS_BETA not in betas:
+            betas.append(MESSAGE_THREADS_BETA)
+        request["betas"] = betas
+
+        request["extra_body"] = {**(payload.get("extra_body") or {}), "thread": thread}
+        self._pending = fingerprints
+        self.threaded = True
+        return request
+
+    @staticmethod
+    def _cached_tail(messages: list, start: int) -> list:
+        new = messages[start:]
+        marker = next(
+            (
+                b["cache_control"]
+                for m in reversed(messages)
+                if isinstance(m.get("content"), list)
+                for b in m["content"]
+                if isinstance(b, dict) and b.get("cache_control")
+            ),
+            None,
+        )
+        has_marker = any(
+            isinstance(b, dict) and b.get("cache_control")
+            for m in new
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+        )
+        if marker is None or has_marker or not new or not isinstance(new[-1].get("content"), list):
+            return new
+
+        from_code = {
+            b.get("id")
+            for m in messages
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("caller")
+        }
+        content = list(new[-1]["content"])
+        for i in range(len(content) - 1, -1, -1):
+            block = content[i]
+            if (
+                isinstance(block, dict)
+                and block.get("type") not in ("thinking", "redacted_thinking")
+                and not block.get("caller")
+                and block.get("tool_use_id") not in from_code
+            ):
+                content[i] = {**block, "cache_control": dict(marker)}
+                return [*new[:-1], {**new[-1], "content": content}]
+        return new
+
+    def responded(self, message: Any) -> None:
+        if not self.threaded:
+            return
+        usage = getattr(message, "usage", None)
+        fallback = any(
+            getattr(i, "type", None) == "fallback_message"
+            for i in (getattr(usage, "iterations", None) or [])
+        )
+        stop_reason = getattr(message, "stop_reason", None)
+        message_id = getattr(message, "id", None)
+
+        if fallback or not message_id or stop_reason in (None, "refusal", "max_tokens"):
+            self._previous_id = None
+            self._stored = []
+            return
+        self._previous_id = message_id
+        self._stored = self._pending
+
+    def disable(self) -> None:
+        self.enabled = False
+        self.threaded = False
+        self._previous_id = None
+        self._stored = []
+
 class Pipe:
     API_VERSION = "2026-10-21"
     _DEFAULT_API_BASE = "https://api.anthropic.com"
@@ -3334,6 +3653,8 @@ class Pipe:
         "claude-mythos-5": 128000,
         "claude-fable-5-1": 128000,
         "claude-mythos-5-1": 128000,
+        "claude-fable-5-2": 128000,
+        "claude-mythos-5-2": 128000,
         "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
@@ -3347,6 +3668,8 @@ class Pipe:
         "claude-mythos-5": 1000000,
         "claude-fable-5-1": 1000000,
         "claude-mythos-5-1": 1000000,
+        "claude-fable-5-2": 1000000,
+        "claude-mythos-5-2": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
@@ -3356,6 +3679,33 @@ class Pipe:
     }
 
     MODEL_CAPABILITY_OVERRIDES = {
+
+        "claude-fable-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+        },
+        "claude-mythos-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+        },
 
         "claude-fable-5-1": {
             "supports_dynamic_filtering": True,
@@ -3524,7 +3874,11 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode (Fable 5.2, Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+        )
+        ENABLE_MESSAGE_THREADS: bool = Field(
+            default=False,
+            description="Message threads (beta): inside a tool loop, send only the new tool results instead of the whole conversation on every request. Smaller requests and a faster first token in long tool loops. Anthropic keeps the conversation in memory for up to 1 hour (not eligible for zero data retention). Not used together with compaction; falls back to full requests on any thread error.",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -3567,6 +3921,7 @@ class Pipe:
             default=3,
             ge=0,
             le=50,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of retries for failed requests (due to rate limiting, transient errors or connection issues)",
         )
         CACHE_CONTROL: Literal[
@@ -3707,7 +4062,9 @@ class Pipe:
             default=8192,
             ge=1024,
             le=64000,
-            description="Thinking budget tokens",
+
+            json_schema_extra={"input": {"type": "range", "step": 1024}},
+            description="Thinking budget tokens. Only used by models without adaptive thinking (Haiku 4.5, Sonnet 4.5, Opus 4.5); newer models follow EFFORT.",
         )
         THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
@@ -3767,12 +4124,14 @@ class Pipe:
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web searches",
         )
         WEB_FETCH_MAX_USES: int = Field(
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web fetch requests per conversation turn",
         )
         WEB_SEARCH_USER_CITY: str = Field(
@@ -3824,14 +4183,20 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal[
+            "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
+            "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+            "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2",
+        ] = Field(
             default="claude-opus-5",
-            description="Advisor model ID.",
+            description="Advisor model ID. The advisor must be at least as capable as the chat model; an invalid pair falls back to the strongest valid advisor. Fable 5.2 can advise every model.",
         )
         ADVISOR_MAX_USES: int = Field(
             default=0,
             ge=0,
             le=100,
+            json_schema_extra={"input": {"type": "range"}},
             description="Max advisor calls per request (0 = unlimited).",
         )
         ADVISOR_CACHING: Literal["off", "5m", "1h"] = Field(
@@ -4348,7 +4713,20 @@ class Pipe:
         if not messages:
             return
 
-        last = messages[-1]
+        at = len(messages) - 1
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            content = msg.get("content")
+            if msg.get("role") == "user" and not (
+                isinstance(content, list)
+                and content
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            ):
+                if self._first_volatile_block_index(msg) is not None:
+                    at = i
+                break
+
+        last = messages[at]
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
@@ -4361,11 +4739,11 @@ class Pipe:
             self._place_cache_on_last_cacheable_block(content[:volatile_at])
             return
 
-        if len(messages) < 2:
+        if at < 1:
 
             return
 
-        self._place_cache_on_last_cacheable_block(messages[-2].get("content", []))
+        self._place_cache_on_last_cacheable_block(messages[at - 1].get("content", []))
 
     def _convert_messages_to_claude_format(
         self, raw_messages
@@ -4378,6 +4756,12 @@ class Pipe:
             return system_messages, processed_messages, previous_marker_metadata
 
         raw_messages = group_item_runs(raw_messages)
+
+        current_user_i = max(
+            (i for i, m in enumerate(raw_messages) if m.get("role") == "user"), default=-1
+        )
+        if any(m.get("role") == "assistant" for m in raw_messages[current_user_i + 1 :]):
+            current_user_i = -1
 
         for i, msg in enumerate(raw_messages):
             role = msg.get("role")
@@ -4468,7 +4852,7 @@ class Pipe:
 
                 processed_messages.append(wrapped_msg)
 
-                if i == len(raw_messages) - 1 and role == "user":
+                if i == current_user_i:
 
                     self._split_rag_into_trailing_block(processed_messages[-1])
 
@@ -5222,7 +5606,9 @@ class Pipe:
 
         stats: dict = {"chats": 0, "skip": 0, "converted": 0, "reflowed": 0, "mismatch": 0, "written": 0, "failed": 0, "mismatches": []}
         chat_ids: set = set()
-        for model_id in await ChatMessages.get_unique_counts_by_model():
+
+        count_by_model = getattr(ChatMessages, "get_unique_counts_by_model", None) or ChatMessages.get_message_count_by_model
+        for model_id in await count_by_model():
             if not str(model_id).startswith(prefix + "."):
                 continue
             skip = 0
@@ -5476,31 +5862,32 @@ class Pipe:
             logger.debug(f"Added web_fetch tool: {web_fetch_type}")
 
         normalized_model_name = self._normalize_model_name(actual_model_name)
-        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
-            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
-        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
+        if __user__["valves"].ENABLE_ADVISOR_TOOL:
             executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
+            fable_52 = ["claude-fable-5-2", "claude-mythos-5-2"]
+            fable_51 = fable_52 + ["claude-fable-5-1", "claude-mythos-5-1"]
+            opus_5 = ["claude-opus-5-5", "claude-opus-5"] + fable_51 + ["claude-fable-5", "claude-mythos-5"]
+            opus_47 = opus_5 + ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5-5"]
+            sonnet_5 = opus_47 + ["claude-sonnet-5", "claude-haiku-5-5"]
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-haiku-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
-                ],
-                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                ],
-                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5": ["claude-opus-5"],
-                "claude-fable-5": ["claude-fable-5"],
-                "claude-mythos-5": ["claude-mythos-5"],
+                "claude-fable-5-2": fable_52,
+                "claude-mythos-5-2": fable_52,
+                "claude-fable-5-1": fable_51,
+                "claude-mythos-5-1": fable_51,
+                "claude-fable-5": opus_5,
+                "claude-mythos-5": opus_5,
+                "claude-opus-5-5": opus_5,
+                "claude-opus-5": opus_5,
+                "claude-opus-4-8": opus_47,
+                "claude-opus-4-7": opus_47,
+                "claude-opus-4-6": sonnet_5 + ["claude-opus-4-6"],
+                "claude-sonnet-5-5": opus_5 + ["claude-sonnet-5-5"],
+                "claude-sonnet-5": sonnet_5,
+                "claude-sonnet-4-6": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
+                "claude-haiku-5-5": sonnet_5,
+                "claude-haiku-4-5": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
             }
             allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
 
@@ -5764,8 +6151,20 @@ class Pipe:
                 if fname_part:
                     prior_filename[file_id_part] = fname_part
 
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
+        latest_user_msg_idx = 0
+        user_msg_idx = -1
+        for m in processed_messages:
+            if m.get("role") != "user":
+                continue
+            user_msg_idx += 1
+            content = m.get("content")
+            only_tool_results = (
+                isinstance(content, list)
+                and bool(content)
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            )
+            if not only_tool_results:
+                latest_user_msg_idx = user_msg_idx
 
         raw_file_msg_idx: Dict[str, int] = {}
         if raw_messages:
@@ -6551,7 +6950,10 @@ class Pipe:
 
     async def _await_tool_approval(self, tool_call_data: dict) -> tuple[bool, Any]:
         mode, event_call = TOOL_APPROVAL.get()
-        if mode != "ask" or event_call is None:
+        if mode not in ("ask", "auto") or event_call is None:
+            return True, None
+
+        if mode == "auto" and tool_call_data.get("approval_required") is False:
             return True, None
 
         name = tool_call_data.get("name", "tool")
@@ -6610,6 +7012,9 @@ class Pipe:
                 awaitable.close()
             return tool_call_data, denial, None
 
+        on_start = TOOL_STARTED.get()
+        if on_start is not None:
+            on_start(tool_call_data.get("id", ""))
         try:
             result = await asyncio.wait_for(awaitable, timeout=max(1, float(timeout_s)))
             return tool_call_data, result, None
@@ -8143,6 +8548,7 @@ class Pipe:
 
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         request_ctx.items = __items__
+        TOOL_STARTED.set(__items__.started if __items__ is not None else None)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
         emit_message_delta = request_ctx.emit_delta
@@ -8354,6 +8760,9 @@ class Pipe:
             tool_loop_iteration = 0
 
             items_base = len(payload_for_stream["messages"])
+            message_thread = MessageThread()
+            if not getattr(self.valves, "ENABLE_MESSAGE_THREADS", False):
+                message_thread.disable()
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -8400,8 +8809,18 @@ class Pipe:
                     )
                     if request_ctx.items is not None:
                         request_ctx.items.begin_response()
+                    _request = message_thread.request(payload_for_stream)
+                    if message_thread.threaded:
+                        logger.debug(
+                            "[THREAD run=%s] iter=%d %s, %d of %d message(s) sent",
+                            run_id,
+                            tool_loop_iteration,
+                            _request["extra_body"]["thread"]["type"],
+                            len(_request["messages"]),
+                            len(payload_for_stream["messages"]),
+                        )
                     async with _stream_client.beta.messages.stream(
-                        **payload_for_stream
+                        **_request
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
@@ -8567,7 +8986,35 @@ class Pipe:
 
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+
+                                                batch_shown = None
+                                                if isinstance(tool_result, OwuiToolBatch):
+                                                    batch_shown = []
+                                                    for entry in tool_result:
+                                                        text, files, embeds = entry["output"], [], []
+                                                        if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                            try:
+                                                                text, files, embeds = await process_tool_result(
+                                                                    __request__, entry["tool_name"], entry["output"],
+                                                                    "pipe", metadata=__metadata__, user=__user__,
+                                                                )
+                                                            except Exception as e:
+                                                                logger.warning(f"process_tool_result failed for '{entry['tool_name']}': {e}")
+                                                        if not isinstance(text, str):
+                                                            try:
+                                                                text = json.dumps(text, ensure_ascii=False)
+                                                            except (TypeError, ValueError):
+                                                                text = str(text)
+                                                        batch_shown.append({
+                                                            "name": entry["tool_name"], "arguments": entry["arguments"],
+                                                            "labels": entry["labels"], "status": entry["status"],
+                                                            "text": text, "files": files or [], "embeds": embeds or [],
+                                                            "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                                                        })
+                                                    tool_result = tool_result.combined([s["text"] for s in batch_shown])
+                                                    tool_result_files = [f for s in batch_shown for f in s["files"]]
+                                                    tool_result_embeds = [e for s in batch_shown for e in s["embeds"]]
+                                                elif PROCESS_TOOL_RESULT_AVAILABLE and __request__:
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -8615,8 +9062,13 @@ class Pipe:
                                                 if is_error:
                                                     result_block["is_error"] = True
                                                 tool_calls.append(result_block)
-                                                if request_ctx.items is not None:
-                                                    request_ctx.items.tool_result(tool_use_id, result_block, result_str)
+                                                if request_ctx.items is not None and batch_shown:
+                                                    request_ctx.items.batch_result(tool_use_id, result_block, batch_shown)
+                                                elif request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(
+                                                        tool_use_id, result_block, result_str,
+                                                        files=tool_result_files, embeds=tool_result_embeds,
+                                                    )
 
                                                 if server_tool_state.in_code_execution:
 
@@ -8781,6 +9233,7 @@ class Pipe:
                                     text_state.chunk_count = 0
 
                         sdk_final_message = stream.current_message_snapshot
+                    message_thread.responded(sdk_final_message)
                     if request_ctx.items is not None:
                         request_ctx.items.end_response()
 
@@ -9077,6 +9530,13 @@ class Pipe:
 
                 except Exception as e:
 
+                    if message_thread.threaded and isinstance(e, (BadRequestError, NotFoundError)):
+                        logger.warning(f"[THREAD] threaded request rejected, sending the full conversation: {e}")
+                        message_thread.disable()
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
+                        continue
+
                     _thinking_cfg = payload_for_stream.get("thinking")
                     if (
                         isinstance(e, BadRequestError)
@@ -9192,7 +9652,9 @@ class Pipe:
                 total_usage["cost_breakdown_usd"] = cost_breakdown
 
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
-        if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
+
+        shows_usage = bool(include_usage and show_token_setting != "Off" and total_usage and not is_internal)
+        if shows_usage:
             def format_num(n: int) -> str:
                 if n >= 1_000_000:
                     return f"{n/1_000_000:.1f}M"
@@ -9350,7 +9812,22 @@ class Pipe:
                 {"type": "replace", "data": {"content": consolidated}}
             )
 
-        await status.complete(final_status)
+        if shows_usage:
+            await status.complete(final_status)
+        else:
+
+            history = None
+            if __metadata__ and __metadata__.get("chat_id") and __metadata__.get("message_id"):
+                try:
+                    from open_webui.models.chats import Chats
+
+                    stored = await Chats.get_message_by_id_and_message_id(
+                        __metadata__["chat_id"], __metadata__["message_id"]
+                    )
+                    history = (stored or {}).get("statusHistory")
+                except Exception as e:
+                    logger.debug(f"statusHistory lookup failed: {e}")
+            await status.complete_quietly(history)
 
         done_data: dict = {"choices": [{"finish_reason": "stop", "delta": {"content": ""}}], "done": True}
         if include_usage and total_usage:

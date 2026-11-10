@@ -22,6 +22,15 @@ class PipeRequestMessagesMethods:
         # thinking) come back as assistant/tool runs; rebuild them in one go.
         raw_messages = group_item_runs(raw_messages)
 
+        # The message the user just wrote. Up to OpenWebUI 0.12 it is the last
+        # one; 0.13 appends hidden tool results (skill list, memories, attached
+        # knowledge) after it, so it is the last *user* message instead.
+        current_user_i = max(
+            (i for i, m in enumerate(raw_messages) if m.get("role") == "user"), default=-1
+        )
+        if any(m.get("role") == "assistant" for m in raw_messages[current_user_i + 1 :]):
+            current_user_i = -1  # already answered (continue a response): nothing volatile to place
+
         for i, msg in enumerate(raw_messages):
             role = msg.get("role")
             raw_content = msg.get("content")
@@ -131,7 +140,7 @@ class PipeRequestMessagesMethods:
 
                 processed_messages.append(wrapped_msg)
 
-                if i == len(raw_messages) - 1 and role == "user":
+                if i == current_user_i:
                     # Volatile context has to end up in trailing blocks of its
                     # own, so the cache breakpoint can sit right before it. RAG
                     # first, then memories -- RAG arrives merged into the prose

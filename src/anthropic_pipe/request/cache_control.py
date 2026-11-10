@@ -668,7 +668,24 @@ class PipeCacheControlMethods:
         if not messages:
             return
 
-        last = messages[-1]
+        # The message the user just wrote is the one that can carry volatile
+        # context. It is the last message up to OpenWebUI 0.12; 0.13 appends
+        # hidden tool results (an assistant tool_use plus a user message of
+        # tool_result blocks) after it, so look back past those.
+        at = len(messages) - 1
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            content = msg.get("content")
+            if msg.get("role") == "user" and not (
+                isinstance(content, list)
+                and content
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            ):
+                if self._first_volatile_block_index(msg) is not None:
+                    at = i
+                break
+
+        last = messages[at]
         volatile_at = self._first_volatile_block_index(last)
 
         if volatile_at is None:
@@ -686,10 +703,10 @@ class PipeCacheControlMethods:
             self._place_cache_on_last_cacheable_block(content[:volatile_at])
             return
 
-        if len(messages) < 2:
+        if at < 1:
             # The whole message is volatile and there is nothing before it.
             # Placing the breakpoint anyway would write an entry that cannot be
             # read back next turn; tools and system keep their own breakpoints.
             return
 
-        self._place_cache_on_last_cacheable_block(messages[-2].get("content", []))
+        self._place_cache_on_last_cacheable_block(messages[at - 1].get("content", []))

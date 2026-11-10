@@ -137,8 +137,25 @@ class PipeRequestFilesMethods:
                 if fname_part:
                     prior_filename[file_id_part] = fname_part
 
-        user_msg_count = sum(1 for m in processed_messages if m.get("role") == "user")
-        latest_user_msg_idx = max(0, user_msg_count - 1)
+        # The latest message the user wrote. OpenWebUI 0.13 puts hidden tool
+        # results (skill list, memories, attached knowledge) after it, which
+        # arrive as a user message of tool_result blocks: a file does not belong
+        # there. Indexes still count every user-role message, so anchors stored
+        # by earlier versions keep pointing at the same message.
+        latest_user_msg_idx = 0
+        user_msg_idx = -1
+        for m in processed_messages:
+            if m.get("role") != "user":
+                continue
+            user_msg_idx += 1
+            content = m.get("content")
+            only_tool_results = (
+                isinstance(content, list)
+                and bool(content)
+                and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            )
+            if not only_tool_results:
+                latest_user_msg_idx = user_msg_idx
 
         raw_file_msg_idx: Dict[str, int] = {}
         if raw_messages:

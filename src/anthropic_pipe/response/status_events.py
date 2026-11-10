@@ -30,6 +30,7 @@ class StatusEmitter:
         """Wrap an OpenWebUI ``emit_event`` callback with dedup state for status events."""
         self._emit_event = emit_event
         self._last_payload: dict[str, Any] | None = None
+        self._sources: dict[str, Any] | None = None
 
     async def emit(
         self,
@@ -90,13 +91,8 @@ class StatusEmitter:
         """
         if not urls:
             return
-        await self.emit(
-            "Searched {{count}} sites",
-            action="web_search",
-            urls=urls,
-            query=query,
-            count=len(urls),
-        )
+        self._sources = {"action": "web_search", "urls": urls, "query": query, "count": len(urls)}
+        await self.emit("Searched {{count}} sites", **self._sources)
 
     async def fetching_url(self, url: str = "") -> None:
         """A web_fetch server tool call is running."""
@@ -137,6 +133,26 @@ class StatusEmitter:
     async def complete(self, description: str) -> None:
         """Close the status line for this turn. Only the final status is `done`."""
         await self.emit(description, done=True, force=True)
+
+    async def complete_quietly(self, history: list | None = None) -> None:
+        """Close the turn without a final line, like OpenWebUI's own connections.
+
+        The frontend shows the status history only while its LAST entry is not
+        hidden, so a hidden close would also hide what should stay: OpenWebUI's
+        own finished statuses (retrieval), notices such as "Files API
+        unavailable", a web search's source list. ``history`` is the message's
+        stored statusHistory; its last such entry is repeated as the final one.
+        Transient phases (done=False) never are.
+        """
+        lasting = [e for e in history or [] if isinstance(e, dict) and not e.get("hidden")
+                   and (e.get("done") or e.get("action") == "web_search")]
+        last = lasting[-1] if lasting else (
+            {"description": "Searched {{count}} sites", **self._sources} if self._sources else None)
+        if last:
+            fields = {k: v for k, v in last.items() if k not in ("description", "done", "hidden")}
+            await self.emit(last.get("description", ""), done=True, force=True, **fields)
+        else:
+            await self.emit("", done=True, hidden=True, force=True)
 
     async def notification(self, content: str, *, type: str = "warning") -> None:
         """Emit an OpenWebUI ``notification`` event (e.g. warning/error toast)."""

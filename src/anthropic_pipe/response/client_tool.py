@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,66 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
     except (TypeError, ValueError) as error:
         return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
     return name, params, None
+
+
+def _owui_call_tool_batch(tool_input: Any) -> list | None:
+    """The entries of a batched ``call_tool`` (OpenWebUI 0.13.1+), or None for the single-call form.
+
+    OpenWebUI's dispatcher spec became ``{"calls": [{tool_name, params}, ...]}``;
+    0.13.0 and older send ``{tool_name, params}``. A batch of one is unwrapped by
+    the caller so it runs exactly like a single call (embeds included).
+    """
+    if isinstance(tool_input, dict) and "calls" in tool_input:
+        return tool_input["calls"] if set(tool_input) == {"calls"} and isinstance(tool_input["calls"], list) else []
+    return None
+
+
+class OwuiToolBatch(list):
+    """Raw per-entry results of a batched ``call_tool``, for the tool loop to finish.
+
+    Each entry: ``tool_name``, ``arguments``, ``labels``, ``status``, ``output``
+    (the tool's raw return value, e.g. an HTMLResponse), ``started_at``,
+    ``ended_at``. The loop runs OpenWebUI's process_tool_result per entry, so
+    every call keeps its own embeds and files, as in OpenWebUI's own loop.
+    """
+
+    def combined(self, texts: list) -> str:
+        """The one tool_result the API gets, shaped like OpenWebUI's replay of a batch."""
+        return json.dumps(
+            {"results": [{"tool_name": e["tool_name"], "status": e["status"], "output": t}
+                         for e, t in zip(self, texts)]},
+            ensure_ascii=False,
+        )
+
+
+async def _run_owui_call_tool_batch(entries: list, tools: dict) -> Any:
+    """Run a batch one call after another; an OwuiToolBatch, or the validation error text."""
+    if not entries:
+        return "Error: call_tool requires a non-empty calls array."
+    if any(not isinstance(e, dict) or set(e) != {"tool_name", "params"} for e in entries):
+        return "Error: Each call requires tool_name and params."
+    batch = OwuiToolBatch()
+    for entry in entries:
+        name, params, error = _resolve_owui_call_tool(entry, tools)
+        tool = tools.get(name) or {}
+        params, labels, _approval = split_owui_call_metadata(params)
+        result = {"tool_name": name if not error else entry["tool_name"],
+                  "arguments": params if isinstance(params, dict) else {},
+                  "labels": labels if tool.get("display_labels") else None,
+                  "started_at": time.time()}
+        if error or not tool.get("callable"):
+            result.update(status="failed", output=error or f'Error: Tool "{name}" cannot run here.')
+        else:
+            try:
+                output = await tool["callable"](**_filter_tool_args(tool, params))
+                if isinstance(output, tuple) and output:
+                    output = output[0]  # tool servers return (data, headers)
+                result.update(status="completed", output=output)
+            except Exception as e:  # one failed call must not drop the others' results
+                result.update(status="failed", output=f"Error: {e}")
+        result["ended_at"] = time.time()
+        batch.append(result)
+    return batch
 
 
 async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
@@ -190,11 +251,45 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         # search is off (request/tools.py): run the tool it names. The result
         # still answers the call_tool tool_use (tool_call_data is unchanged).
         call_tool_error = None
+        call_tool_batch = None
         if tools and (tools.get(tool_name) or {}).get("tool_id") == f"builtin:{OWUI_CALL_TOOL_NAME}":
-            tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+            call_tool_batch = _owui_call_tool_batch(tool_input)
+            if call_tool_batch is not None and len(call_tool_batch) == 1:
+                tool_input, call_tool_batch = call_tool_batch[0], None
+            if call_tool_batch and getattr(ctx, "items", None) is not None:
+                # The item shows the first entry; the others get their own items with the result.
+                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools)
+                if not first_error:
+                    first_params, _labels, _approval = split_owui_call_metadata(first_params)
+                    ctx.items.dispatched(tool_call_data.get("id"), first, first_params)
+            if call_tool_batch is None:
+                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+                if not call_tool_error and getattr(ctx, "items", None) is not None:
+                    ctx.items.dispatched(tool_call_data.get("id"), tool_name, tool_input)
 
         tool = tools.get(tool_name) if tools else None
-        if call_tool_error:
+
+        # OpenWebUI 0.13 adds `__labels__` (Tool Call Labels) and `__approval__`
+        # (Auto tool permissions) to tool schemas and marks the tools it did
+        # that to. Both are meant for OpenWebUI, not for the tool: take them
+        # out of the arguments, show the labels, keep the approval verdict.
+        if isinstance(tool, dict) and (tool.get("display_labels") or tool.get("approval_review")):
+            tool_input, labels, approval_required = split_owui_call_metadata(tool_input)
+            if tool_call_data.get("name") == tool_name:
+                tool_call_data["input"] = tool_input
+            if tool.get("approval_review"):
+                tool_call_data["approval_required"] = approval_required is not False
+            if labels and tool.get("display_labels") and getattr(ctx, "items", None) is not None:
+                ctx.items.call_labels(tool_call_data.get("id"), labels, tool_input)
+
+        if call_tool_batch is not None:
+            task = asyncio.create_task(
+                pipe._await_tool_task_result(
+                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools)
+                )
+            )
+            running_tool_tasks.append(task)
+        elif call_tool_error:
 
             async def call_tool_error_result(message=call_tool_error):
                 """Return the dispatcher's validation error as the tool result."""

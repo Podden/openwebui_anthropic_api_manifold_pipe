@@ -255,41 +255,41 @@ class PipeRequestToolsMethods:
         # Add advisor tool if enabled (beta). Executor↔advisor pair validation
         # The advisor must be at least as capable as the executor.
         # If the pair is invalid, downgrade the advisor to the next compatible model.
-        # Opus 5.5 has no row in Anthropic's advisor compatibility table
-        # (2026-09-22), so any advisor would 400 the request. Normalize first so a
-        # dated id ("claude-opus-5-5-20260215" from Azure/custom proxies) still
-        # trips both the skip guard and the executor->advisor lookup below, matching
-        # get_model_info's handling of the same ids.
+        # Normalize first so a dated id ("claude-opus-5-5-20260215" from
+        # Azure/custom proxies) still hits the executor->advisor lookup below,
+        # matching get_model_info's handling of the same ids.
         normalized_model_name = self._normalize_model_name(actual_model_name)
-        if __user__["valves"].ENABLE_ADVISOR_TOOL and normalized_model_name == "claude-opus-5-5":
-            logger.warning("Advisor tool skipped: no valid advisor pair for claude-opus-5-5")
-        elif __user__["valves"].ENABLE_ADVISOR_TOOL:
+        if __user__["valves"].ENABLE_ADVISOR_TOOL:
             executor_model = normalized_model_name
             advisor_model = __user__["valves"].ADVISOR_MODEL
 
-            # Valid advisor models per executor (advisor must be ≥ executor in capability),
-            # strongest first so allowed[0] is the best fallback. These lists already only
-            # contain API-supported advisors, so a single membership check covers both
-            # "unsupported" and "incompatible" cases.
+            # Valid advisor models per executor, from the model compatibility
+            # table of the advisor tool docs (2026-11-10). allowed[0] is the
+            # fallback when the configured advisor is not valid for the
+            # executor, so each list starts with the strongest advisor every
+            # account can call (Mythos needs a verified organization).
+            fable_52 = ["claude-fable-5-2", "claude-mythos-5-2"]
+            fable_51 = fable_52 + ["claude-fable-5-1", "claude-mythos-5-1"]
+            opus_5 = ["claude-opus-5-5", "claude-opus-5"] + fable_51 + ["claude-fable-5", "claude-mythos-5"]
+            opus_47 = opus_5 + ["claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5-5"]
+            sonnet_5 = opus_47 + ["claude-sonnet-5", "claude-haiku-5-5"]
             valid_advisors = {
-                "claude-haiku-4-5": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-haiku-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
-                ],
-                "claude-sonnet-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-sonnet-5-5": [
-                    "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
-                    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
-                ],
-                "claude-sonnet-5": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-4-6": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-7": ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7"],
-                "claude-opus-4-8": ["claude-opus-5", "claude-opus-4-8"],
-                "claude-opus-5": ["claude-opus-5"],
-                "claude-fable-5": ["claude-fable-5"],
-                "claude-mythos-5": ["claude-mythos-5"],
+                "claude-fable-5-2": fable_52,
+                "claude-mythos-5-2": fable_52,
+                "claude-fable-5-1": fable_51,
+                "claude-mythos-5-1": fable_51,
+                "claude-fable-5": opus_5,
+                "claude-mythos-5": opus_5,
+                "claude-opus-5-5": opus_5,
+                "claude-opus-5": opus_5,
+                "claude-opus-4-8": opus_47,
+                "claude-opus-4-7": opus_47,
+                "claude-opus-4-6": sonnet_5 + ["claude-opus-4-6"],
+                "claude-sonnet-5-5": opus_5 + ["claude-sonnet-5-5"],
+                "claude-sonnet-5": sonnet_5,
+                "claude-sonnet-4-6": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
+                "claude-haiku-5-5": sonnet_5,
+                "claude-haiku-4-5": sonnet_5 + ["claude-opus-4-6", "claude-sonnet-4-6"],
             }
             allowed_advisors = valid_advisors.get(executor_model, ["claude-opus-5"])
 

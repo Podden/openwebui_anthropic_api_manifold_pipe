@@ -27,7 +27,21 @@ class ModelPricing:
     # and cache reads -- exceeds the threshold bills ALL its tokens, output
     # included, at the long rates.
     RATES = {
-        # Cache reads on Fable/Mythos 5.1 are 0.025x instead of 0.1x.
+        # Cache reads on Fable/Mythos 5.2 and 5.1 are 0.025x instead of 0.1x.
+        "claude-fable-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
+        "claude-mythos-5-2": {
+            "input": 8.0,
+            "output": 40.0,
+            "cache_read": 0.20,
+            "fast_input": 16.0,
+            "fast_output": 80.0,
+        },
         "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
         "claude-fable-5": {"input": 10.0, "output": 50.0},

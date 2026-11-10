@@ -541,7 +541,7 @@ async def create_request_payload(
         getattr(pipe.valves, "ENABLE_CACHE_DIAGNOSTICS", False)
         and pipe.valves.CACHE_CONTROL != "cache disabled"
     ):
-        beta_headers.append("cache-diagnosis-2026-04-07")
+        # GA since 2026-09-23: the `diagnostics` object alone opts in.
         chat_id_for_diag = __metadata__.get("chat_id") if __metadata__ else None
         # Prefer the response id persisted as a `cachediag` marker on the prior
         # assistant message (survives pipe restarts / multiple workers). Fall

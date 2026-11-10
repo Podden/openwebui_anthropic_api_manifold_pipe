@@ -4,9 +4,9 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.0
+version: 0.11.1
 license: MIT
-requirements: pydantic>=2.0.0, anthropic~=2.0, pillow-heif>=0.18.0
+requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
     - ANTHROPIC_API_KEY (required)
 
@@ -32,11 +32,27 @@ Supports:
 - Tool Search (BM25/Regex)
 - Native PDF Upload (visual PDF analysis with charts/images)
 - Agent Skills (pptx, xlsx, docx, pdf and custom skills)
-- Fast Mode for Opus 5.5 / 5
+- Fast Mode for Fable 5.2 and Opus 5.5 / 5
+- Message threads for tool loops (beta, optional)
 - Programmatic Tool Calling (tools callable from code execution)
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.1
+- Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
+- Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
+- New valve ENABLE_MESSAGE_THREADS (beta, off by default): inside a tool loop the pipe sends only the new tool results instead of the whole conversation on every request, so requests get smaller. Measured with about 25k tokens of context it is not faster, and after a web search the next request writes the search result to the cache again (an API-side miss, reported to Anthropic), so it stays off unless your loops are long and search-free. Anthropic holds the conversation in memory for up to an hour (not eligible for zero data retention). Not used together with compaction; any thread error falls back to full requests.
+- OpenWebUI 0.13 puts the skill list, memories and attached knowledge after the user's message as hidden tool results. The pipe took that tool result for the user's message: retrieved file context (RAG) ended up inside the cached prefix, so every follow-up in a chat with files re-wrote the conversation instead of reading it from the prompt cache, and a newly attached full-context file was placed on the tool result. Both now go by the message the user wrote. OpenWebUI 0.12 behaves as before.
+- OpenWebUI 0.13: Tool Call Labels show on the pipe's tool calls, and the label and approval fields OpenWebUI adds to tool schemas no longer reach the tool. Tool permission mode "Auto" is honoured: a tool runs unasked only when the model marks the call as needing no approval, otherwise the pipe asks.
+- The chat migration from 0.11.0 (LEGACY_CHAT_MIGRATION) stopped with an error on OpenWebUI 0.12.4 and newer, which renamed a database call; neither the dry run nor `on` did anything there. It runs again; chatting was not affected.
+- OpenWebUI 0.13.1 Tool Search: `call_tool` now takes a batch (`calls`: list of tool_name + params). The pipe only knew the single-call form, so every deferred tool failed with "call_tool requires tool_name and params". The calls run in order; each shows as its own tool with its own result and card, as in OpenWebUI's own loop, while the API gets one call with one combined result, so the replay and the prompt cache are unchanged. OpenWebUI 0.13.0 and older keep the single-call form.
+- Tool Rich UI (HTML cards such as a weather widget) shows again in chats with output items: the embeds and files a tool returns now sit on its result item, as OpenWebUI's own connections store them. Since 0.11.0 they were dropped there.
+- OpenWebUI Tool Search: the call shows as the tool it ran (e.g. get_weather) instead of a hidden call_tool, like OpenWebUI's own loop; the replay still sends the API's call_tool.
+- Tool calls carry started_at / ended_at / duration. OpenWebUI's Stop handling uses them to tell "outcome unknown" from "not executed", its analytics show the time.
+- Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
+- Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
+- Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
+
 v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
 - Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
 - The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
@@ -52,11 +68,6 @@ v0.10.3
 - A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
 - Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
 - Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
-
-v0.10.2
-- Logs carry no chat content or personal data at any level, DEBUG included. The [PAYLOAD] line replaces every string in messages, system and metadata with its length and a salted hash (`‹33c#8cf3e5f8›`); type, role, ids, tool names and cache_control stay readable, so prompt-cache drift is still traceable. Before, the system prompt (memories, user name, location) went out in full and message text clipped to 20 characters.
-- Also gone from the logs: stream event bodies, tool arguments and results, web/tool search queries, bash commands, code execution / web search / advisor results, citations, file names (now file ids), extracted memories, refusal explanations, task responses (titles, tags), the CACHE-DIFF message dumps, and the API key in the DEBUG Valves dump.
-- The anthropic SDK logger is capped at INFO: under GLOBAL_LOG_LEVEL=DEBUG it logged every request body in full. OpenWebUI's own DEBUG logs still contain chat content; keep GLOBAL_LOG_LEVEL at INFO or above in production.
 
 """
 
@@ -349,6 +360,12 @@ SLIM_OUTPUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # requests, so this must not live on `self`.
 TOOL_APPROVAL: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "anthropic_pipe_tool_approval", default=("full", None)
+)
+# Called with the tool_use id when a client tool starts running (after approval).
+# Item mode stamps `started_at` on the call: OpenWebUI's Stop handler reads it to
+# tell "outcome unknown" from "not executed", its analytics show the duration.
+TOOL_STARTED: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
+    "anthropic_pipe_tool_started", default=None
 )
 
 # Pattern to strip OpenWebUI <details type="code_interpreter"> blocks from conversation history.
@@ -840,6 +857,9 @@ class PipeRequestContext:
 # BEGIN GENERATED SECTION: anthropic_pipe.shared.output_items
 # END GENERATED SECTION: anthropic_pipe.shared.output_items
 
+# BEGIN GENERATED SECTION: anthropic_pipe.shared.threads
+# END GENERATED SECTION: anthropic_pipe.shared.threads
+
 
 
 
@@ -870,6 +890,8 @@ class Pipe:
         "claude-mythos-5": 128000,
         "claude-fable-5-1": 128000,
         "claude-mythos-5-1": 128000,
+        "claude-fable-5-2": 128000,
+        "claude-mythos-5-2": 128000,
         "claude-haiku-5-5": 128000,
         "claude-haiku-4-5": 64000,
     }
@@ -891,6 +913,8 @@ class Pipe:
         "claude-mythos-5": 1000000,
         "claude-fable-5-1": 1000000,
         "claude-mythos-5-1": 1000000,
+        "claude-fable-5-2": 1000000,
+        "claude-mythos-5-2": 1000000,
         "claude-opus-4-8": 1000000,
         "claude-opus-4-7": 1000000,
         "claude-opus-4-6": 1000000,
@@ -910,6 +934,35 @@ class Pipe:
     # `thinking:{"type":"adaptive"}` -- which the API rejects. Pinning it per identity makes those endpoints
     # behave like the direct one.
     MODEL_CAPABILITY_OVERRIDES = {
+        # Fable 5.2 / Mythos 5.2 (2026-11-09): adaptive thinking always on,
+        # no forced tool_choice, all five effort levels, fast mode GA (no beta
+        # header). Mythos mirrors Fable (see the parity note below).
+        "claude-fable-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+        },
+        "claude-mythos-5-2": {
+            "supports_dynamic_filtering": True,
+            "supports_fast_mode": True,
+            "supports_compaction": True,
+            "supports_thinking": True,
+            "supports_adaptive_thinking": True,
+            "supports_effort": True,
+            "supports_effort_xhigh": True,
+            "supports_effort_max": True,
+            "supports_structured_outputs": True,
+            "thinking_always_on": True,
+            "supports_forced_tool_choice": False,
+        },
         # Fable 5.1 / Mythos 5.1 reject tool_choice "tool" and "any" with a 400
         # (auto/none unchanged). /v1/models does not report that, so it is
         # pinned by identity; Mythos mirrors Fable (see the parity note below).
@@ -1106,7 +1159,11 @@ class Pipe:
         )
         ENABLE_FAST_MODE: bool = Field(
             default=False,
-            description="Enable Fast Mode for Opus Models (Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+            description="Enable Fast Mode (Fable 5.2, Opus 5.5 / 5). Up to 2.5x faster output at higher costs",
+        )
+        ENABLE_MESSAGE_THREADS: bool = Field(
+            default=False,
+            description="Message threads (beta): inside a tool loop, send only the new tool results instead of the whole conversation on every request. Smaller requests and a faster first token in long tool loops. Anthropic keeps the conversation in memory for up to 1 hour (not eligible for zero data retention). Not used together with compaction; falls back to full requests on any thread error.",
         )
         REFUSAL_FALLBACK: Literal[
             "off",
@@ -1149,6 +1206,7 @@ class Pipe:
             default=3,
             ge=0,
             le=50,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of retries for failed requests (due to rate limiting, transient errors or connection issues)",
         )
         CACHE_CONTROL: Literal[
@@ -1289,7 +1347,9 @@ class Pipe:
             default=8192,
             ge=1024,
             le=64000,
-            description="Thinking budget tokens",
+            # Slider on OpenWebUI >= 0.12.5; older versions show a number box.
+            json_schema_extra={"input": {"type": "range", "step": 1024}},
+            description="Thinking budget tokens. Only used by models without adaptive thinking (Haiku 4.5, Sonnet 4.5, Opus 4.5); newer models follow EFFORT.",
         )
         THINKING_DISPLAY: Literal["summarized", "omitted", "updates"] = Field(
             default="omitted",
@@ -1356,12 +1416,14 @@ class Pipe:
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web searches",
         )
         WEB_FETCH_MAX_USES: int = Field(
             default=5,
             ge=1,
             le=20,
+            json_schema_extra={"input": {"type": "range"}},
             description="Maximum number of web fetch requests per conversation turn",
         )
         WEB_SEARCH_USER_CITY: str = Field(
@@ -1413,14 +1475,20 @@ class Pipe:
             default=False,
             description="Enable the Advisor tool. A faster executor model consults a stronger advisor model mid-generation for strategic guidance.",
         )
-        ADVISOR_MODEL: Literal["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1"] = Field(
+        ADVISOR_MODEL: Literal[
+            "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-opus-5-5",
+            "claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+            "claude-fable-5", "claude-mythos-5", "claude-fable-5-1", "claude-mythos-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2",
+        ] = Field(
             default="claude-opus-5",
-            description="Advisor model ID.",
+            description="Advisor model ID. The advisor must be at least as capable as the chat model; an invalid pair falls back to the strongest valid advisor. Fable 5.2 can advise every model.",
         )
         ADVISOR_MAX_USES: int = Field(
             default=0,
             ge=0,
             le=100,
+            json_schema_extra={"input": {"type": "range"}},
             description="Max advisor calls per request (0 = unlimited).",
         )
         ADVISOR_CACHING: Literal["off", "5m", "1h"] = Field(

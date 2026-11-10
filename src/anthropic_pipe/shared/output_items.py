@@ -89,6 +89,36 @@ def display_text(text: str) -> str:
     return _DATA_IMAGE.sub("[image]", text or "")
 
 
+OWUI_CALL_METADATA = ("__labels__", "__approval__")
+
+
+def split_owui_call_metadata(tool_input: Any) -> tuple[Any, Optional[dict], Optional[bool]]:
+    """Take OpenWebUI's per-call metadata out of a tool input (OpenWebUI 0.13).
+
+    Returns ``(arguments, labels, approval_required)``: the arguments the tool
+    itself declares, the ``running`` / ``completed`` labels if the model wrote
+    valid ones, and whether the model asked for human approval (``None`` when
+    it said nothing, ``True`` for anything malformed). Mirrors
+    ``prepare_tool_call`` in OpenWebUI's ``utils/tool_calling.py``.
+    """
+    if not isinstance(tool_input, dict) or not any(k in tool_input for k in OWUI_CALL_METADATA):
+        return tool_input, None, None
+    arguments = {k: v for k, v in tool_input.items() if k not in OWUI_CALL_METADATA}
+    labels = tool_input.get("__labels__")
+    if isinstance(labels, dict) and all(
+        isinstance(labels.get(k), str) and 0 < len(labels[k].strip()) <= 120 for k in ("running", "completed")
+    ):
+        labels = {k: labels[k].strip() for k in ("running", "completed")}
+    else:
+        labels = None
+    required = None
+    if "__approval__" in tool_input:
+        approval = tool_input["__approval__"]
+        valid = isinstance(approval, dict) and set(approval) == {"required"} and type(approval["required"]) is bool
+        required = approval["required"] if valid else True
+    return arguments, labels, required
+
+
 class _StoredBlock:
     """content_block_start/stop stand-in for a block that comes from storage, not a stream."""
 
@@ -280,10 +310,13 @@ class ItemStream:
             call["use"] = api_block
             item = self.items[entry[1]]
             if api_block is not None:
-                item["arguments"] = json.dumps(api_block.get("input", {}), ensure_ascii=False)
+                # call_labels / dispatched already set the tool's own arguments
+                if "display_labels" not in item and "api_name" not in call:
+                    item["arguments"] = json.dumps(api_block.get("input", {}), ensure_ascii=False)
                 # The tool loop's next request needs the exact call before its result exists.
                 payload = {"v": 1, "use": api_block, **({"after_client": True} if call["after_client"] else {})}
-                item["provider_function"] = {"name": item["name"], "arguments": {ANTHROPIC_KEY: payload}}
+                item["provider_function"] = {"name": call.get("api_name", item["name"]),
+                                             "arguments": {ANTHROPIC_KEY: payload}}
             self._done(entry[1])  # still in_progress: waits for its result
         elif kind == "other" and api_block is not None:
             use_id = api_block.get("tool_use_id")
@@ -298,13 +331,86 @@ class ItemStream:
         self.on_start(event)
         self.on_stop(event, block)
 
-    # -- tool results ------------------------------------------------------
-    def tool_result(self, call_id: str, result_block: dict, text: str) -> None:
-        """A client tool ran: complete its call and show what it returned."""
-        if call_id in self._calls:
-            self._finish_call(call_id, result_block, display_text(text))
+    def call_labels(self, call_id: str, labels: dict, arguments: Any) -> None:
+        """Tool Call Labels (OpenWebUI 0.13): show the model's labels instead of the tool name."""
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        item["display_labels"] = labels
+        item["arguments"] = json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False)
+        self._done(call["idx"])
 
-    def _finish_call(self, call_id: str, result: Optional[dict], text: str, status: str = "completed") -> None:
+    def dispatched(self, call_id: str, name: str, arguments: Any) -> None:
+        """OpenWebUI Tool Search: show the tool ``call_tool`` ran, as OpenWebUI's own loop does.
+
+        The item takes the target's name and arguments and is not hidden;
+        provider_function keeps the API's call (``call_tool``) for the replay.
+        """
+        call = self._calls.get(call_id)
+        if call is None:
+            return
+        item = self.items[call["idx"]]
+        call.setdefault("api_name", item["name"])
+        item.update(name=name, hidden=False,
+                    arguments=json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False))
+        if "provider_function" in item:
+            item["provider_function"]["name"] = call["api_name"]
+        self._done(call["idx"])
+
+    def started(self, call_id: str) -> None:
+        """A client tool began running (approved): stamp it like OpenWebUI's own loop."""
+        call = self._calls.get(call_id)
+        if call is not None and "started_at" not in self.items[call["idx"]]:
+            self.items[call["idx"]]["started_at"] = time.time()
+            self._done(call["idx"])
+
+    # -- tool results ------------------------------------------------------
+    def tool_result(self, call_id: str, result_block: dict, text: str,
+                    files: Optional[list] = None, embeds: Optional[list] = None) -> None:
+        """A client tool ran: complete its call and show what it returned (Rich UI embeds, files)."""
+        if call_id in self._calls:
+            self._finish_call(call_id, result_block, display_text(text), files=files, embeds=embeds)
+
+    def batch_result(self, call_id: str, result_block: dict, shown: list) -> None:
+        """A batched ``call_tool`` ran: one visible call per entry, as OpenWebUI's own loop shows it.
+
+        ``shown``: per entry ``name, arguments, labels, status, text, files,
+        embeds, started_at, ended_at``. The API call keeps the first entry's
+        item and the combined result (``result_block``). The other entries get
+        items without the API call, which the replay leaves out (rebuild_run),
+        so live and replay still send one tool_use with one tool_result.
+        """
+        if call_id not in self._calls or not shown:
+            return
+        members = []
+        for entry in shown[1:]:
+            member_id = _new_id("call")
+            item = {"id": _new_id("fc"), "type": "function_call", "call_id": member_id, "name": entry["name"],
+                    "arguments": json.dumps(entry["arguments"], ensure_ascii=False), "status": entry["status"],
+                    "hidden": False, "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                    "duration": round(entry["ended_at"] - entry["started_at"], 3),
+                    "provider_function": {"name": entry["name"],
+                                          "arguments": {ANTHROPIC_KEY: {"v": 1, "batch_of": call_id}}}}
+            if entry.get("labels"):
+                item["display_labels"] = entry["labels"]
+            self._done(self._add(item))
+            members.append((member_id, entry))
+        first = shown[0]
+        if first.get("labels"):
+            self.items[self._calls[call_id]["idx"]]["display_labels"] = first["labels"]
+        # The tool message shows the first entry; the API result keeps the combined content.
+        self._finish_call(call_id, dict(result_block), display_text(first["text"]), status=first["status"],
+                          files=first.get("files"), embeds=first.get("embeds"))
+        for member_id, entry in members:
+            self._done(self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": member_id,
+                                  "status": "completed",
+                                  "output": [{"type": "input_text", "text": display_text(entry["text"])}],
+                                  **({"files": entry["files"]} if entry.get("files") else {}),
+                                  **({"embeds": entry["embeds"]} if entry.get("embeds") else {})}))
+
+    def _finish_call(self, call_id: str, result: Optional[dict], text: str, status: str = "completed",
+                     files: Optional[list] = None, embeds: Optional[list] = None) -> None:
         call = self._calls.pop(call_id)
         item = self.items[call["idx"]]
         # A server call made before a client call in the same response can get
@@ -328,10 +434,14 @@ class ItemStream:
         if call.get("after_client"):
             payload["after_client"] = True
         item["status"] = status
-        item["provider_function"] = {"name": item["name"], "arguments": {ANTHROPIC_KEY: payload}}
+        if "started_at" in item:
+            item["ended_at"] = time.time()
+            item["duration"] = round(item["ended_at"] - item["started_at"], 3)
+        item["provider_function"] = {"name": call.get("api_name", item["name"]), "arguments": {ANTHROPIC_KEY: payload}}
         self._done(call["idx"])
         out = self._add({"id": _new_id("fco"), "type": "function_call_output", "call_id": call_id,
-                         "status": "completed", "output": [{"type": "input_text", "text": text}]})
+                         "status": "completed", "output": [{"type": "input_text", "text": text}],
+                         **({"files": files} if files else {}), **({"embeds": embeds} if embeds else {})})
         self._done(out)
 
     def _inline(self, block: dict) -> None:

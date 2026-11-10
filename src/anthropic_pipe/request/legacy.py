@@ -406,7 +406,9 @@ class PipeLegacyMethods:
 
         stats: dict = {"chats": 0, "skip": 0, "converted": 0, "reflowed": 0, "mismatch": 0, "written": 0, "failed": 0, "mismatches": []}
         chat_ids: set = set()
-        for model_id in await ChatMessages.get_unique_counts_by_model():
+        # OpenWebUI 0.12.4 renamed get_unique_counts_by_model; both return {model_id: count}.
+        count_by_model = getattr(ChatMessages, "get_unique_counts_by_model", None) or ChatMessages.get_message_count_by_model
+        for model_id in await count_by_model():
             if not str(model_id).startswith(prefix + "."):
                 continue
             skip = 0

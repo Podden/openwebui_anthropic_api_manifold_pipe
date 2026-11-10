@@ -262,7 +262,13 @@ class PipeStreamSupportMethods:
         (negative) result and the tool loop continues instead of stalling.
         """
         mode, event_call = TOOL_APPROVAL.get()
-        if mode != "ask" or event_call is None:
+        if mode not in ("ask", "auto") or event_call is None:
+            return True, None
+        # "auto" (OpenWebUI 0.13): the model reviews its own call through the
+        # `__approval__` argument OpenWebUI adds to the tool schema. Only an
+        # explicit "no approval needed" runs unasked; with an external review
+        # engine there is no such argument and the pipe asks every time.
+        if mode == "auto" and tool_call_data.get("approval_required") is False:
             return True, None
 
         name = tool_call_data.get("name", "tool")
@@ -330,6 +336,9 @@ class PipeStreamSupportMethods:
                 awaitable.close()  # never started; release it without a warning
             return tool_call_data, denial, None
 
+        on_start = TOOL_STARTED.get()
+        if on_start is not None:
+            on_start(tool_call_data.get("id", ""))
         try:
             result = await asyncio.wait_for(awaitable, timeout=max(1, float(timeout_s)))
             return tool_call_data, result, None

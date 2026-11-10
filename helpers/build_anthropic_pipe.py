@@ -49,6 +49,7 @@ STREAM_SOURCES = [
     ("response.internal_tool_results", SRC_DIR / "response" / "internal_tool_results.py"),
     ("shared.pricing", SRC_DIR / "shared" / "pricing.py"),
     ("shared.output_items", SRC_DIR / "shared" / "output_items.py"),
+    ("shared.threads", SRC_DIR / "shared" / "threads.py"),
 ]
 
 

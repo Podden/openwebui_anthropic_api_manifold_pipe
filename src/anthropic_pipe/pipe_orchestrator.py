@@ -117,6 +117,7 @@ class PipeOrchestratorMethods:
         # =========================================================================
         request_ctx = PipeRequestContext(pipe=self, event_emitter=__event_emitter__)
         request_ctx.items = __items__
+        TOOL_STARTED.set(__items__.started if __items__ is not None else None)
         final_message = request_ctx.final_message
         emit_event_local = request_ctx.emit_event
         emit_message_delta = request_ctx.emit_delta
@@ -404,6 +405,9 @@ class PipeOrchestratorMethods:
             # Where this turn starts in the request; with output items the tool
             # loop rebuilds everything after it from the items (see below).
             items_base = len(payload_for_stream["messages"])
+            message_thread = MessageThread()
+            if not getattr(self.valves, "ENABLE_MESSAGE_THREADS", False):
+                message_thread.disable()
             while (
                 current_function_calls < max_function_calls
                 and not conversation_ended
@@ -455,8 +459,18 @@ class PipeOrchestratorMethods:
                     )
                     if request_ctx.items is not None:
                         request_ctx.items.begin_response()
+                    _request = message_thread.request(payload_for_stream)
+                    if message_thread.threaded:
+                        logger.debug(
+                            "[THREAD run=%s] iter=%d %s, %d of %d message(s) sent",
+                            run_id,
+                            tool_loop_iteration,
+                            _request["extra_body"]["thread"]["type"],
+                            len(_request["messages"]),
+                            len(payload_for_stream["messages"]),
+                        )
                     async with _stream_client.beta.messages.stream(
-                        **payload_for_stream
+                        **_request
                     ) as stream:
                         async for event in stream:
                             event_type = getattr(event, "type", None)
@@ -662,7 +676,36 @@ class PipeOrchestratorMethods:
                                                 # for Rich UI (HTMLResponse, embeds, files)
                                                 tool_result_embeds = []
                                                 tool_result_files = []
-                                                if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                # Batched call_tool (OpenWebUI 0.13.1+): every entry
+                                                # through process_tool_result, so each keeps its embeds.
+                                                batch_shown = None
+                                                if isinstance(tool_result, OwuiToolBatch):
+                                                    batch_shown = []
+                                                    for entry in tool_result:
+                                                        text, files, embeds = entry["output"], [], []
+                                                        if PROCESS_TOOL_RESULT_AVAILABLE and __request__:
+                                                            try:
+                                                                text, files, embeds = await process_tool_result(
+                                                                    __request__, entry["tool_name"], entry["output"],
+                                                                    "pipe", metadata=__metadata__, user=__user__,
+                                                                )
+                                                            except Exception as e:
+                                                                logger.warning(f"process_tool_result failed for '{entry['tool_name']}': {e}")
+                                                        if not isinstance(text, str):
+                                                            try:
+                                                                text = json.dumps(text, ensure_ascii=False)
+                                                            except (TypeError, ValueError):
+                                                                text = str(text)
+                                                        batch_shown.append({
+                                                            "name": entry["tool_name"], "arguments": entry["arguments"],
+                                                            "labels": entry["labels"], "status": entry["status"],
+                                                            "text": text, "files": files or [], "embeds": embeds or [],
+                                                            "started_at": entry["started_at"], "ended_at": entry["ended_at"],
+                                                        })
+                                                    tool_result = tool_result.combined([s["text"] for s in batch_shown])
+                                                    tool_result_files = [f for s in batch_shown for f in s["files"]]
+                                                    tool_result_embeds = [e for s in batch_shown for e in s["embeds"]]
+                                                elif PROCESS_TOOL_RESULT_AVAILABLE and __request__:
                                                     try:
                                                         tool_result, tool_result_files, tool_result_embeds = (
                                                             await process_tool_result(
@@ -724,8 +767,13 @@ class PipeOrchestratorMethods:
                                                 if is_error:
                                                     result_block["is_error"] = True
                                                 tool_calls.append(result_block)
-                                                if request_ctx.items is not None:
-                                                    request_ctx.items.tool_result(tool_use_id, result_block, result_str)
+                                                if request_ctx.items is not None and batch_shown:
+                                                    request_ctx.items.batch_result(tool_use_id, result_block, batch_shown)
+                                                elif request_ctx.items is not None:
+                                                    request_ctx.items.tool_result(
+                                                        tool_use_id, result_block, result_str,
+                                                        files=tool_result_files, embeds=tool_result_embeds,
+                                                    )
 
                                                 if server_tool_state.in_code_execution:
                                                     # Accumulate for unified code execution display
@@ -918,6 +966,7 @@ class PipeOrchestratorMethods:
                         # Capture SDK accumulated message after stream is fully consumed
                         # This replaces manual api_assistant_blocks/thinking_blocks accumulation
                         sdk_final_message = stream.current_message_snapshot
+                    message_thread.responded(sdk_final_message)
                     if request_ctx.items is not None:
                         request_ctx.items.end_response()
                     # Log stream event diagnostics
@@ -1268,6 +1317,19 @@ class PipeOrchestratorMethods:
                 # - APIConnectionError: Network issues, retryable
                 # ---------------------------------------------------------
                 except Exception as e:
+                    # A threaded request the API rejects (thread expired, a fixed
+                    # field changed by one of the retries below, a feature threads
+                    # do not support) is sent again in full, without a thread; a
+                    # genuine request error then surfaces on that attempt.
+                    # ponytail: any 400/404 switches threads off for the rest of
+                    # the turn instead of matching the thread_* error codes; costs
+                    # one extra unbilled request when the error was not about the thread.
+                    if message_thread.threaded and isinstance(e, (BadRequestError, NotFoundError)):
+                        logger.warning(f"[THREAD] threaded request rejected, sending the full conversation: {e}")
+                        message_thread.disable()
+                        if request_ctx.items is not None:
+                            request_ctx.items.rollback()
+                        continue
                     # Opus 5.5 binds replayed thinking blocks to the prefix they
                     # were produced with. OpenWebUI edits that prefix (tool
                     # toggles, system prompt), and accounts created after
@@ -1421,7 +1483,10 @@ class PipeOrchestratorMethods:
 
         # ============ Token Count Display ============
         show_token_setting = __user__["valves"].SHOW_TOKEN_COUNT
-        if include_usage and show_token_setting != "Off" and total_usage and not is_internal:
+        # Without the token display there is nothing to say: no final line, as
+        # with OpenWebUI's own connections.
+        shows_usage = bool(include_usage and show_token_setting != "Off" and total_usage and not is_internal)
+        if shows_usage:
             def format_num(n: int) -> str:
                 """Format a token count as a short human-readable string (e.g. 1.2K, 3.4M)."""
                 if n >= 1_000_000:
@@ -1617,8 +1682,23 @@ class PipeOrchestratorMethods:
                 {"type": "replace", "data": {"content": consolidated}}
             )
 
-        await status.complete(final_status)
-        
+        if shows_usage:
+            await status.complete(final_status)
+        else:
+            # OpenWebUI stores every status event before the emitter returns.
+            history = None
+            if __metadata__ and __metadata__.get("chat_id") and __metadata__.get("message_id"):
+                try:
+                    from open_webui.models.chats import Chats
+
+                    stored = await Chats.get_message_by_id_and_message_id(
+                        __metadata__["chat_id"], __metadata__["message_id"]
+                    )
+                    history = (stored or {}).get("statusHistory")
+                except Exception as e:
+                    logger.debug(f"statusHistory lookup failed: {e}")
+            await status.complete_quietly(history)
+
         # Emit chat:completion done event so frontend knows streaming finished
         # (triggers TTS finish, usage display, etc.)
         done_data: dict = {"choices": [{"finish_reason": "stop", "delta": {"content": ""}}], "done": True}
