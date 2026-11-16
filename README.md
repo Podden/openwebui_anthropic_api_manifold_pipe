@@ -77,6 +77,25 @@ OpenWebUI brings its own built-in tools (`search_web`, `fetch_url`, `execute_cod
 | Code | Code Interpreter button (with `CODE_EXECUTION` on), Code Execution Toggle, Files API uploads or programmatic tool calling → `code_execution`, `execute_code` is dropped. Button and toggle need the model's Code Interpreter switch | OpenWebUI's `execute_code`, if its Code Interpreter button is on and `CODE_EXECUTION` is off |
 | Tool Search | `ENABLE_TOOL_SEARCH` on → Claude's native tool search (off under programmatic tool calling on models that support it) | OpenWebUI's Tool Search if enabled in Admin → Interface, otherwise all tools loaded |
 
+### Setup by OpenWebUI version
+
+| OpenWebUI | Function Calling | Companion Filter | Worth setting up |
+|-----------|------------------|------------------|------------------|
+| `0.8.11` – `0.9.x` | **Native**. Unset meant the prompt-based mode there, which bypasses the pipe's tool loop; the pipe switches the model to Native on the first request with tools and asks you to re-run it | Not needed with Native. Before `0.8.2` OpenWebUI added its code-interpreter prompt even with Native: attach it there | Toggle filters, the model's Builtin Tools switches (since `0.8.0`). Answers use the text path |
+| `0.10` – `0.12.1` | Native is the default | Only for models set to **Legacy** | `ENABLE_VALVE_ENCRYPTION=true` if you want OpenWebUI to encrypt valves itself (otherwise the pipe encrypts the API key). Tool approval from `0.11.1`, OpenWebUI's Context Compaction from `0.11.3` (the pipe's `ENABLE_COMPACTION` steps aside on chats it summarized) |
+| `0.12.2` – `0.12.x` | Native | Only for Legacy | Answers stream as output items (recommended minimum). From `0.12.3` OpenWebUI has its own Tool Search: `ENABLE_TOOL_SEARCH` on uses Claude's instead, off uses OpenWebUI's |
+| `0.13+` | Native | Only for Legacy | Tool Call Labels and the "Auto" tool permission mode work with the pipe's tool calls; `call_tool` batches from `0.13.1` |
+
+Toggle filters, by need:
+
+| Toggle | Use it when |
+|--------|-------------|
+| **Thinking**, **Fast Mode**, **Files API** | Any version: per-message switches for things OpenWebUI has no button for |
+| **Web Search** | Only if `WEB_SEARCH` is off and you want Anthropic search for single messages. With the valve on, OpenWebUI's own Web Search button does the same |
+| **Code Execution** | Only if `CODE_EXECUTION` is off and you want Anthropic code execution for single messages. With the valve on, OpenWebUI's Code Interpreter button does the same |
+
+Both the Web Search and the Code Execution toggle respect the model's Builtin Tools switches: with the switch off they do nothing.
+
 A chat that started with another model can carry that model's calls to `search_web` or OpenWebUI's `call_tool`. If Claude repeats such a call, the pipe answers with the tool to use instead (for example "Use the 'web_search' tool instead") rather than a dead-end error.
 
 ---
@@ -251,8 +270,8 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 | Component | Purpose |
 |-----------|---------|
 | **Thinking Toggle** | One-shot thinking enable for the next message |
-| **Web Search Toggle** | One-shot web-search forcing for the next message |
-| **Code Execution Toggle** | One-shot code-execution enable for the next message |
+| **Web Search Toggle** | One-shot web-search forcing for the next message. Only needed with `WEB_SEARCH` off, see [Setup by OpenWebUI version](#setup-by-openwebui-version) |
+| **Code Execution Toggle** | One-shot code-execution enable for the next message. Only needed with `CODE_EXECUTION` off |
 | **Files API Toggle** | One-shot Files API mode for file-heavy / skill-heavy flows |
 | **Fast Mode Toggle** | One-shot fast mode for the next message (Fable 5.2, Opus 5.5 / 5; ignored on other models) |
 | **Companion Filter** | Only for Function Calling `Legacy`: switches off OpenWebUI's own web search / code interpreter so the Anthropic tools run instead. With `Native` the pipe handles the buttons itself |
