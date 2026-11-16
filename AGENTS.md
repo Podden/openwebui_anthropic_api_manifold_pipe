@@ -36,7 +36,7 @@ The build works by marker pairs (`# BEGIN/END GENERATED SECTION: anthropic_pipe.
 | `helpers/minify_pipe.py` | Strips comments/docstrings (keeps the module docstring OpenWebUI parses) for the upload artifact. |
 | `anthropic_pipe.py` | Generated single-file OpenWebUI artifact (committed; this is what users install). |
 | `anthropic_pipe.min.py` | Generated minified artifact. Committed too -- it is offered as an install source, so it must never lag behind `anthropic_pipe.py`. The build writes both. |
-| `anthropic_manifold_companion_filter.py` | Routes OpenWebUI's built-in web_search / code_interpreter buttons to Anthropic-native tools. |
+| `anthropic_manifold_companion_filter.py` | Only needed with Function Calling `Legacy`: switches off OpenWebUI's own web_search / code_interpreter so the Anthropic tools run. With `Native` the pipe reads the buttons itself (since 0.11.2). |
 | `anthropic_pipe_{thinking,web_search,code_execution,files}_toggle.py` | One-shot toggle filters. |
 | `README.md` | User-facing docs: install, valves, changelog. Keep the changelog in sync with the template docstring. |
 

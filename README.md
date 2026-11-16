@@ -6,7 +6,7 @@
 
 ## 📌 Current status
 
-- **Current pipe version:** `0.11.1`
+- **Current pipe version:** `0.11.2`
 - **Recommended OpenWebUI:** `0.12.2+` (answers stream as native output items; older versions from `0.9.0+` keep the text path)
 - **Minimum practical OpenWebUI for good UX:** `0.8.11+`
 - **Requirements:** `pydantic>=2.0.0`, `anthropic~=2.7`, `pillow-heif>=0.18.0`
@@ -30,7 +30,7 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 | **Files** | Native PDF upload, Anthropic Files API upload/download, file persistence markers, code-exec file roundtrips |
 | **Skills** | Prebuilt and custom Agent Skills, skill validation, API-side skill support via Files API + code execution |
 | **Context efficiency** | Prompt caching, optional 1-hour cache TTL, token/cache stats, context editing, compaction, tool search, Advisor sub-inference |
-| **OpenWebUI integration** | Notes, channels, task generation, built-in tools, MCP tools, sub-agents, tool approval, toggle filters, companion filter for native Anthropic buttons |
+| **OpenWebUI integration** | Notes, channels, task generation, built-in tools, MCP tools, sub-agents, tool approval, toggle filters; OpenWebUI's Web Search / Code Interpreter buttons switch on the Anthropic tools |
 
 ---
 
@@ -52,17 +52,32 @@ This pipe targets the **Anthropic Messages API** directly through the official *
 1. Open **Admin Settings** → **Functions** → **+ New Function**
 2. Paste the source of [`anthropic_pipe.py`](anthropic_pipe.py) from this repo — or [`anthropic_pipe.min.py`](anthropic_pipe.min.py), the same pipe with comments and docstrings stripped (~28% smaller, quicker to paste)
 3. Repeat for the toggle filters you want to use (`anthropic_pipe_thinking_toggle.py`, `anthropic_pipe_web_search_toggle.py`, `anthropic_pipe_code_execution_toggle.py`, `anthropic_pipe_files_toggle.py`, `anthropic_pipe_fast_toggle.py`)
-4. Optionally install the **Companion Filter**
-5. Set the admin valves described below
+4. Set the admin valves described below (at least `ANTHROPIC_API_KEY`, or the `ANTHROPIC_API_KEY` environment variable)
+5. The **Companion Filter** is only needed if a model runs with Function Calling **`Legacy`** (see below)
 
 ### Recommended OpenWebUI model configuration
 
 For each Claude model in **Admin Settings → Models**:
 
-1. Attach the toggle filters you want available for that model
-2. Set **Function Calling** to **`Native`**
-3. Optionally attach the **Companion Filter** if you want OpenWebUI's built-in `web_search` / `code_interpreter` buttons to route to Anthropic-native tools
-4. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 5.5** or **Sonnet 5.5**)
+1. Set **Function Calling** to **`Native`** (the default since OpenWebUI 0.10)
+2. Attach the toggle filters you want available for that model
+3. Use the model's **Builtin Tools** switches to decide what the model may use. **Web Search** off: no Anthropic web search and no web fetch for this model, whatever the valves say. **Code Interpreter** off: no code execution on request (Files API uploads and programmatic tool calling still turn it on, they need it)
+4. OpenWebUI's **Web Search** and **Code Interpreter** buttons in the chat input work without any filter: with `WEB_SEARCH` / `CODE_EXECUTION` on, they switch on Anthropic's tools instead of OpenWebUI's
+5. Attach the **Companion Filter** only to models with Function Calling **`Legacy`**: there OpenWebUI would run its own search and code-interpreter prompt before the pipe sees the request, and the filter switches those off
+6. If you plan to use **Skills** or **Files API** workflows heavily, prefer models with strong tool and code-exec support (today that usually means **Opus 5.5** or **Sonnet 5.5**)
+
+### Which tool runs when
+
+OpenWebUI brings its own built-in tools (`search_web`, `fetch_url`, `execute_code`) and its own Tool Search. The pipe offers Claude only one of each pair:
+
+| Feature | Anthropic tool when | Otherwise |
+|---------|--------------------|-----------|
+| Web search | `WEB_SEARCH` on (or the Web Search Toggle) **and** the model's Web Search switch on → `web_search`, OpenWebUI's `search_web` is dropped. The Web Search button forces a search for that message | OpenWebUI's `search_web`, if its Web Search button is on |
+| Fetch a URL | `WEB_FETCH` on **and** the model's Web Search switch on → `web_fetch`, `fetch_url` is dropped | OpenWebUI's `fetch_url` |
+| Code | Code Interpreter button (with `CODE_EXECUTION` on), Code Execution Toggle, Files API uploads or programmatic tool calling → `code_execution`, `execute_code` is dropped. Button and toggle need the model's Code Interpreter switch | OpenWebUI's `execute_code`, if its Code Interpreter button is on and `CODE_EXECUTION` is off |
+| Tool Search | `ENABLE_TOOL_SEARCH` on → Claude's native tool search (off under programmatic tool calling on models that support it) | OpenWebUI's Tool Search if enabled in Admin → Interface, otherwise all tools loaded |
+
+A chat that started with another model can carry that model's calls to `search_web` or OpenWebUI's `call_tool`. If Claude repeats such a call, the pipe answers with the tool to use instead (for example "Use the 'web_search' tool instead") rather than a dead-end error.
 
 ---
 
@@ -96,6 +111,9 @@ Recent OpenWebUI releases matter for this pipe:
 
 - **0.12.2**
    - pipes can stream OpenWebUI output items with provider data (`provider_function`, `reasoning_details`) that come back on the next turn. From pipe 0.11.0 on, answers stream this way: thinking, tool calls and server tools render natively and the prompt cache holds across them
+- **0.13**
+   - skill list, memories and attached knowledge arrive as hidden tool results after the user's message; Tool Call Labels and the "Auto" tool permission mode, both honoured by the pipe (0.11.1+)
+   - **0.13.1:** `call_tool` takes a batch of calls; the pipe runs each and shows it as its own tool
 
 If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.9.0+` moved DB/model helpers to async. The pipe is already migrated, but custom additions must also follow the async model/helper rules. See the official migration guide: https://docs.openwebui.com/features/extensibility/plugin/migration/to-0.9.0
 
@@ -116,8 +134,9 @@ If you fork this pipe or copy code into your own plugin, note that OpenWebUI `0.
 | `ENABLE_FAST_MODE` | `false` | Sends Anthropic's `speed: "fast"` tier on models that support it (Fable 5.2, Opus 5.5 / 5; up to ~2.5x faster, higher cost). Per message: Fast Mode Toggle |
 | `REFUSAL_FALLBACK` | `off` | Retry a safety-refused request server-side: `off`, `default` (Anthropic's per-category recommendation), or a pinned model. Claude API only; skipped for Haiku 5.5, which has no server-side fallback |
 | `ENABLE_INTERLEAVED_THINKING` | `true` | Allows thinking blocks between tool calls where supported |
-| `WEB_SEARCH` | `true` | Enables Anthropic native web search |
-| `WEB_FETCH` | `true` | Enables Anthropic native URL fetch |
+| `WEB_SEARCH` | `true` | Anthropic web search replaces OpenWebUI's `search_web` / `fetch_url`. A model whose Web Search builtin tool is switched off cannot search, even with this on. The Web Search button forces a search for that message |
+| `WEB_FETCH` | `true` | Anthropic native URL fetch (replaces `fetch_url`; follows the model's Web Search switch) |
+| `CODE_EXECUTION` | `true` | The Code Interpreter button turns on Anthropic code execution instead of OpenWebUI's `execute_code` (and removes the pyodide note OpenWebUI adds to the system prompt). A model whose Code Interpreter builtin tool is switched off gets neither |
 | `MAX_TOOL_CALLS` | `15` | Maximum Claude → tool → Claude loop count per request |
 | `MAX_RETRIES` | `3` | Retries for overload, rate limits, and transient transport/provider errors |
 | `CACHE_CONTROL` | `cache tools array, system prompt and messages` | Prompt caching scope (see below) |
@@ -236,11 +255,18 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 | **Code Execution Toggle** | One-shot code-execution enable for the next message |
 | **Files API Toggle** | One-shot Files API mode for file-heavy / skill-heavy flows |
 | **Fast Mode Toggle** | One-shot fast mode for the next message (Fable 5.2, Opus 5.5 / 5; ignored on other models) |
-| **Companion Filter** | Routes OpenWebUI's built-in `web_search` / `code_interpreter` UI actions to Anthropic-native tools |
+| **Companion Filter** | Only for Function Calling `Legacy`: switches off OpenWebUI's own web search / code interpreter so the Anthropic tools run instead. With `Native` the pipe handles the buttons itself |
 
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.2`
+_Tested on OpenWebUI 0.13.3._
+- WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.
+- The Web Search and Code Interpreter buttons work without the Companion Filter: the pipe reads them itself. The filter is only needed with function calling set to "legacy".
+- The model's Builtin Tools switches apply: with Web Search off the model gets neither web_search nor web_fetch (even with WEB_SEARCH on or the web search toggle), with Code Interpreter off no code execution on request. Files API uploads and programmatic tool calling still turn code execution on, they need it.
+- A chat started with another model can carry its calls to search_web or OpenWebUI's call_tool. Claude copied them, got "not available ... not configured" and answered without searching. A call to a replaced tool now gets "Use the 'web_search' tool instead" (only when that tool is in the request), a call_tool the request does not offer says to call tools by name.
+
 ### `v0.11.1`
 _Tested on OpenWebUI 0.12.3 and 0.13.3. Needs `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe._
 - Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.

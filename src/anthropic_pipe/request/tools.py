@@ -169,6 +169,11 @@ class PipeRequestToolsMethods:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+        # The model's Web Search builtin switch covers search and fetch, as in OpenWebUI.
+        web_allowed = owui_builtin_allowed(__metadata__, "web_search")
+        if web_search_enabled and not web_allowed:
+            logger.info("Web search skipped: the model's Web Search builtin tool is switched off")
+            web_search_enabled = False
         if web_search_enabled and not self.get_model_info(actual_model_name).get(
             "supports_web_search_tool", True
         ):
@@ -234,7 +239,7 @@ class PipeRequestToolsMethods:
         # web_fetch_20260209 has dynamic filtering (requires code execution)
         # web_fetch_20250910 works on all models without dynamic filtering
         model_info = self.get_model_info(actual_model_name)
-        if self.valves.WEB_FETCH:
+        if self.valves.WEB_FETCH and web_allowed:
             use_dynamic_fetch = __user__["valves"].ENABLE_DYNAMIC_FILTERING
             if use_dynamic_fetch and model_info.get("supports_dynamic_filtering", False):
                 web_fetch_type = "web_fetch_20260209"

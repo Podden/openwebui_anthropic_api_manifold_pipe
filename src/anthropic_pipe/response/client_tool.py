@@ -50,13 +50,29 @@ def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
     return kept
 
 
-def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, str | None]:
+def _call_tool_error(message: str, offered: set | None) -> str:
+    """A call_tool error; when this request did not offer call_tool (it came from the chat history), say so."""
+    if offered and OWUI_CALL_TOOL_NAME not in offered:
+        return f"{message} {unavailable_tool_message(OWUI_CALL_TOOL_NAME, offered)}"
+    return message
+
+
+def _is_replaced(name: str, offered: set | None) -> bool:
+    """An OpenWebUI tool this request replaced with its Anthropic tool."""
+    native = OWUI_NATIVE_REPLACEMENTS.get(name)
+    return bool(offered and native in offered and name not in offered)
+
+
+def _resolve_owui_call_tool(
+    tool_input: Any, tools: dict, offered: set | None = None
+) -> tuple[str, dict, str | None]:
     """Unwrap OpenWebUI's ``call_tool`` dispatcher into the tool it names.
 
     Same checks and messages as ``open_webui.utils.tool_search.resolve_tool_call``,
     which only runs in OpenWebUI's own tool loop, not in ours. ``params`` may
     also come as an object: the pipe does not send the dispatcher as strict.
-    Returns ``(tool_name, args, error)``.
+    ``offered``: the tool names of this request, for errors that point the
+    model at a replacement. Returns ``(tool_name, args, error)``.
     """
     try:
         if not isinstance(tool_input, dict) or set(tool_input) != {"tool_name", "params"}:
@@ -66,6 +82,8 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
             raise ValueError("tool_name must be a non-empty string.")
         if name in {OWUI_SEARCH_TOOL_NAME, OWUI_CALL_TOOL_NAME}:
             raise ValueError("call_tool cannot invoke search_tools or itself.")
+        if _is_replaced(name, offered):
+            raise ValueError(unavailable_tool_message(name, offered))
         if name not in tools:
             raise ValueError(f'Tool "{name}" is not available. Search for an available tool.')
         params = tool_input["params"]
@@ -74,7 +92,7 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
         if not isinstance(params, dict):
             raise ValueError("params must decode to a JSON object.")
     except (TypeError, ValueError) as error:
-        return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
+        return OWUI_CALL_TOOL_NAME, {}, _call_tool_error(f"Error: {error}", offered)
     return name, params, None
 
 
@@ -108,15 +126,15 @@ class OwuiToolBatch(list):
         )
 
 
-async def _run_owui_call_tool_batch(entries: list, tools: dict) -> Any:
+async def _run_owui_call_tool_batch(entries: list, tools: dict, offered: set | None = None) -> Any:
     """Run a batch one call after another; an OwuiToolBatch, or the validation error text."""
     if not entries:
-        return "Error: call_tool requires a non-empty calls array."
+        return _call_tool_error("Error: call_tool requires a non-empty calls array.", offered)
     if any(not isinstance(e, dict) or set(e) != {"tool_name", "params"} for e in entries):
-        return "Error: Each call requires tool_name and params."
+        return _call_tool_error("Error: Each call requires tool_name and params.", offered)
     batch = OwuiToolBatch()
     for entry in entries:
-        name, params, error = _resolve_owui_call_tool(entry, tools)
+        name, params, error = _resolve_owui_call_tool(entry, tools, offered)
         tool = tools.get(name) or {}
         params, labels, _approval = split_owui_call_metadata(params)
         result = {"tool_name": name if not error else entry["tool_name"],
@@ -220,6 +238,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
     tools = ctx.tools
     builtin_tools = ctx.builtin_tools
     api_tool_names = ctx.api_tool_names
+    offered = getattr(ctx, "offered_tool_names", None) or set()
     running_tool_tasks = tool_use.running_tasks
     emit_delta = ctx.emit_delta
     emit_event = ctx.event_emitter
@@ -258,12 +277,12 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 tool_input, call_tool_batch = call_tool_batch[0], None
             if call_tool_batch and getattr(ctx, "items", None) is not None:
                 # The item shows the first entry; the others get their own items with the result.
-                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools)
+                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools, offered)
                 if not first_error:
                     first_params, _labels, _approval = split_owui_call_metadata(first_params)
                     ctx.items.dispatched(tool_call_data.get("id"), first, first_params)
             if call_tool_batch is None:
-                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools, offered)
                 if not call_tool_error and getattr(ctx, "items", None) is not None:
                     ctx.items.dispatched(tool_call_data.get("id"), tool_name, tool_input)
 
@@ -285,11 +304,17 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         if call_tool_batch is not None:
             task = asyncio.create_task(
                 pipe._await_tool_task_result(
-                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools)
+                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools, offered)
                 )
             )
             running_tool_tasks.append(task)
-        elif call_tool_error:
+        elif call_tool_error or _is_replaced(tool_name, offered):
+            # A replaced OpenWebUI tool (search_web with web_search on) does not
+            # run even though OpenWebUI still passes its callable: point the
+            # model at the Anthropic tool instead.
+            if not call_tool_error:
+                logger.info("Tool '%s' replaced by '%s': returning a pointer", tool_name, OWUI_NATIVE_REPLACEMENTS[tool_name])
+                call_tool_error = json.dumps({"error": unavailable_tool_message(tool_name, offered)}, ensure_ascii=False)
 
             async def call_tool_error_result(message=call_tool_error):
                 """Return the dispatcher's validation error as the tool result."""
@@ -398,12 +423,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
 
             async def error_result(tn=tool_name):
                 """Build the JSON error payload returned when a requested tool is not available."""
-                return json.dumps(
-                    {
-                        "error": f"Tool '{tn}' is not available. It may require server context or is not configured."
-                    },
-                    ensure_ascii=False,
-                )
+                return json.dumps({"error": unavailable_tool_message(tn, offered)}, ensure_ascii=False)
 
             task = asyncio.create_task(
                 pipe._await_tool_task_result(tool_call_data, error_result())

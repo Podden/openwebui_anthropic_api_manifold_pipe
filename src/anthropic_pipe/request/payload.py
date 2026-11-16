@@ -336,9 +336,14 @@ async def create_request_payload(
         __tools__, body, actual_model_name, __user__, __metadata__
     )
 
-    activate_code_execution = __metadata__.get(
-        "activate_code_execution_tool", False
-    )
+    # Code execution on request: the Code Execution toggle / Companion Filter
+    # flag, or (CODE_EXECUTION valve) OpenWebUI's Code Interpreter button. The
+    # model's Code Interpreter builtin switch can turn these off; the automatic
+    # cases below (Files API, programmatic calling) need the tool and stay.
+    activate_code_execution = bool(
+        __metadata__.get("activate_code_execution_tool", False)
+        or (pipe.valves.CODE_EXECUTION and (__metadata__.get("features") or {}).get("code_interpreter"))
+    ) and owui_builtin_allowed(__metadata__, "code_interpreter")
 
     # Auto-enable code execution when Files API uploaded files (container_upload needs it)
     if has_files_api_uploads:
@@ -397,6 +402,10 @@ async def create_request_payload(
             tools_list.insert(0, {"type": code_exec_type, "name": "code_execution"})
             has_code_execution = True
         # else: dynamic filtering tools present, no programmatic → let API auto-inject
+
+    # Anthropic's tool replaces OpenWebUI's: offering both lets the model pick
+    # the one that cannot do what the native one does (citations, cache).
+    tools_list = drop_replaced_owui_tools(tools_list)
 
     if requested_skills and not has_code_execution:
         await status.activity("Skills require Anthropic code_execution")

@@ -312,6 +312,29 @@ class PipeOrchestratorMethods:
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
                         msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])
 
+            # OpenWebUI's Web Search / Code Interpreter buttons, read here so the
+            # Companion Filter is optional: with the valve on, the button means
+            # the Anthropic tool. OpenWebUI's own tools then drop out in
+            # _create_payload, and the pyodide note it appended for its
+            # execute_code goes too (constant text, so the cached prefix holds).
+            features = (__metadata__ or {}).get("features") or {}
+            if features.get("web_search") and self.valves.WEB_SEARCH and __metadata__ is not None:
+                __metadata__["web_search_enforced"] = True
+            if (
+                features.get("code_interpreter")
+                and self.valves.CODE_EXECUTION
+                and CODE_INTERPRETER_PYODIDE_PROMPT
+                and owui_builtin_allowed(__metadata__, "code_interpreter")
+            ):
+                for msg in body.get("messages", []):
+                    if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+                        # OpenWebUI appends it as "\n" + prompt (utils/misc.py update_message_content).
+                        msg["content"] = (
+                            msg["content"]
+                            .replace("\n" + CODE_INTERPRETER_PYODIDE_PROMPT, "")
+                            .replace(CODE_INTERPRETER_PYODIDE_PROMPT, "")
+                        )
+
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
             )
@@ -329,6 +352,7 @@ class PipeOrchestratorMethods:
             request_ctx.api_key = api_key
             request_ctx.builtin_tools = builtin_tools
             request_ctx.api_tool_names = api_tool_names
+            request_ctx.offered_tool_names = {t.get("name") for t in payload.get("tools") or []}
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (

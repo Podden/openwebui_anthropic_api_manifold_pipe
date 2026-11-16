@@ -1,8 +1,8 @@
 """
 title: Anthropic Manifold Companion
 id: anthropic_manifold_companion
-version: 1.0.0
-description: Companion filter for Anthropic Manifold pipe. Intercepts OpenWebUI web_search/code_interpreter features and use the ones provided by Anthropic. Use with Podden's Anthropic Pipe.
+version: 1.0.1
+description: Optional since Anthropic Pipe 0.11.2, which handles the Web Search / Code Interpreter buttons itself. Still needed with function calling set to "legacy", where OpenWebUI would run its own search before the pipe. Use with Podden's Anthropic Pipe.
 author: Podden (https://github.com/Podden/)
 """
 from typing import Any, Optional, Dict

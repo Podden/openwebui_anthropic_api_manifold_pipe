@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.1
+version: 0.11.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.2
+- WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.
+- The Web Search and Code Interpreter buttons work without the Companion Filter: the pipe reads them itself. The filter is only needed with function calling set to "legacy".
+- The model's Builtin Tools switches apply: with Web Search off the model gets neither web_search nor web_fetch (even with WEB_SEARCH on or the web search toggle), with Code Interpreter off no code execution on request. Files API uploads and programmatic tool calling still turn code execution on, they need it.
+- A chat started with another model can carry its calls to search_web or OpenWebUI's call_tool. Claude copied them, got "not available ... not configured" and answered without searching. A call to a replaced tool now gets "Use the 'web_search' tool instead" (only when that tool is in the request), a call_tool the request does not offer says to call tools by name.
+
 v0.11.1
 - Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
 - Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
@@ -60,14 +66,6 @@ v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep t
 - Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
 - In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
 - A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
-
-v0.10.3
-- Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
-- Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
-- Follow-ups no longer fail with "tool_use ids were found without tool_result blocks immediately after" when a local tool round was followed by thinking or a server tool such as web search. Replay used to end a tool round only at text and folded two rounds into one assistant message; it now ends the round at any content. A server tool the model called in the same response as a client tool stays with it (marked since v0.9.39). Chats replayed with the old structure get one prompt-cache miss (#58, reported by @yinccc999).
-- A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
-- Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
-- Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
 
 """
 
@@ -312,6 +310,54 @@ DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
 OWUI_SEARCH_TOOL_NAME = "search_tools"
 OWUI_CALL_TOOL_NAME = "call_tool"
 OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
+
+# OpenWebUI builtin tools and the Anthropic tool that replaces each one. When
+# the replacement goes out, the OpenWebUI tool is dropped from the request and
+# a call to it (e.g. copied from another model's turns in the same chat) gets
+# a pointer to the replacement instead of a dead end.
+OWUI_NATIVE_REPLACEMENTS = {
+    "search_web": "web_search",
+    "fetch_url": "web_fetch",
+    "execute_code": "code_execution",
+}
+
+
+def owui_builtin_allowed(metadata: Optional[dict], category: str) -> bool:
+    """False when the OpenWebUI model switches this builtin category off.
+
+    Same two switches OpenWebUI checks in get_builtin_tools: Builtin Tools
+    (meta.builtinTools) and Capabilities (meta.capabilities), both default on.
+    """
+    meta = (((metadata or {}).get("model") or {}).get("info") or {}).get("meta") or {}
+    return (meta.get("builtinTools") or {}).get(category, True) is not False and (
+        meta.get("capabilities") or {}
+    ).get(category, True) is not False
+
+
+def drop_replaced_owui_tools(tools: List[dict]) -> List[dict]:
+    """Remove OpenWebUI tools whose Anthropic replacement is in the list.
+
+    A tool search tool left with no deferred tool to search goes too.
+    """
+    names = {t.get("name") for t in tools}
+    dropped = {o for o, n in OWUI_NATIVE_REPLACEMENTS.items() if o in names and n in names}
+    if not dropped:
+        return tools
+    logging.getLogger(__name__).info(f"Dropped {sorted(dropped)}: replaced by Anthropic tools")
+    kept = [t for t in tools if t.get("name") not in dropped]
+    if not any(t.get("defer_loading") for t in kept):
+        kept = [t for t in kept if not str(t.get("type", "")).startswith("tool_search_tool_")]
+    return kept
+
+
+def unavailable_tool_message(name: str, offered: set) -> str:
+    """Error text for a call to a tool this request did not offer, naming what to use instead."""
+    native = OWUI_NATIVE_REPLACEMENTS.get(name)
+    if native and native in offered:
+        return f"Tool '{name}' does not exist in this chat. Use the '{native}' tool instead."
+    if name == OWUI_CALL_TOOL_NAME:
+        return "Tool 'call_tool' does not exist in this chat. Call tools directly by their name."
+    return f"Tool '{name}' is not available. It may require server context or is not configured."
 
 
 def normalize_tool_name_list(value: Any) -> set[str]:
@@ -589,6 +635,13 @@ except ImportError:
     get_builtin_tools = None
     BUILTIN_TOOLS_AVAILABLE = False
 
+# Appended to the system prompt by OpenWebUI when the Code Interpreter button is
+# on (pyodide engine); removed again when Anthropic code execution replaces it.
+try:
+    from open_webui.config import CODE_INTERPRETER_PYODIDE_PROMPT
+except ImportError:
+    CODE_INTERPRETER_PYODIDE_PROMPT = ""
+
 # Import process_tool_result for Rich UI (HTMLResponse, embeds, files)
 try:
     from open_webui.utils.middleware import process_tool_result
@@ -691,6 +744,7 @@ class PipeRequestContext:
     tools: Optional[Dict[str, Any]] = None
     builtin_tools: Dict[str, Any] = field(default_factory=dict)
     api_tool_names: List[str] = field(default_factory=list)
+    offered_tool_names: set = field(default_factory=set)
     api_key: str = ""
 
     # Persistence throttle for progress re-renders (see REPLACE_PERSIST_INTERVAL)
@@ -1190,7 +1244,18 @@ class Pipe:
         )
         WEB_SEARCH: bool = Field(
             default=True,
-            description="Enable web search tool for Claude models. Use Anthropic Web Search Toggle Function for fine grained control",
+            description=(
+                "Anthropic web search replaces OpenWebUI's search_web / fetch_url. "
+                "A model whose Web Search builtin tool is switched off cannot search, even with this on. "
+                "The Web Search button forces a search for that message."
+            ),
+        )
+        CODE_EXECUTION: bool = Field(
+            default=True,
+            description=(
+                "The Code Interpreter button turns on Anthropic code execution instead of OpenWebUI's execute_code. "
+                "A model whose Code Interpreter builtin tool is switched off gets neither."
+            ),
         )
         WEB_FETCH: bool = Field(
             default=True,

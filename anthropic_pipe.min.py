@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.1
+version: 0.11.2
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,12 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.2
+- WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.
+- The Web Search and Code Interpreter buttons work without the Companion Filter: the pipe reads them itself. The filter is only needed with function calling set to "legacy".
+- The model's Builtin Tools switches apply: with Web Search off the model gets neither web_search nor web_fetch (even with WEB_SEARCH on or the web search toggle), with Code Interpreter off no code execution on request. Files API uploads and programmatic tool calling still turn code execution on, they need it.
+- A chat started with another model can carry its calls to search_web or OpenWebUI's call_tool. Claude copied them, got "not available ... not configured" and answered without searching. A call to a replaced tool now gets "Use the 'web_search' tool instead" (only when that tool is in the request), a call_tool the request does not offer says to call tools by name.
+
 v0.11.1
 - Claude Fable 5.2 and Mythos 5.2: model data, prices ($8 / $40 per MTok, fast mode $16 / $80) and fast mode, which needs no beta header there. Thinking cannot be switched off on them; with the thinking toggle off the pipe sends effort `low`, as on Opus 5.5.
 - Advisor pairs follow Anthropic's current table: Fable 5.2 can advise every model, a Fable 5.2 chat model takes only Fable / Mythos 5.2, Opus 5.5 gets an advisor (the tool was skipped there before), and Sonnet 4.6 / 5 / 5.5, Haiku 5.5 and Opus 4.6 are selectable advisors. An invalid pair still falls back to the strongest valid advisor.
@@ -60,14 +66,6 @@ v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep t
 - Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
 - In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
 - A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
-
-v0.10.3
-- Streaming no longer rewrites the chat in the database on every delta. OpenWebUI stores each `replace` and `message` event by rewriting the whole chat row, so a long answer wrote a long chat hundreds of times per turn and Postgres grew until it ran out of space. Text deltas now go out as `chat:message:delta` and thinking, tool-input, code-preview and compaction re-renders as `chat:message` (both shown, not stored); the stored copy follows at most every 5 seconds and at every block end. A thinking answer went from 111 stored events to 8 (#59, reported by @icsy7867).
-- Reloading the page, reopening the tab, a dropped connection or a phone that put the browser in the background mid-stream: the answer is whole again within 2 seconds and keeps streaming. OpenWebUI's frontend only appends deltas, so a reloaded or reconnected page missed everything in between; every 2 s a delta now goes out as the full content instead. Tested in the browser for reload, tab close, offline, 10 s / 60 s freeze, stop, and reload during thinking.
-- Follow-ups no longer fail with "tool_use ids were found without tool_result blocks immediately after" when a local tool round was followed by thinking or a server tool such as web search. Replay used to end a tool round only at text and folded two rounds into one assistant message; it now ends the round at any content. A server tool the model called in the same response as a client tool stays with it (marked since v0.9.39). Chats replayed with the old structure get one prompt-cache miss (#58, reported by @yinccc999).
-- A web search in the same turn as a local tool no longer breaks the prompt cache on the next message: the tool loop sent the result's `caller: direct` field, replay rebuilt the block without it. `direct` callers are now dropped from every block, as they already were on tool_use.
-- Fast mode is no longer offered on Opus 4.8: Anthropic removes it on 2026-11-30, after which speed "fast" on claude-opus-4-8 returns an error. Opus 5.5 and Opus 5 keep it. The fast toggle filter's description now names those two.
-- Native PDF upload takes PDFs up to 64 MB on the Claude API (was 25 MB), following the request limit raised from 32 to 128 MB. A custom ANTHROPIC_BASE_URL keeps 25 MB. The size is checked before the file is read.
 
 """
 
@@ -215,6 +213,37 @@ DEFAULT_TOOL_SEARCH_EXCLUDE_TOOLS = (
 OWUI_SEARCH_TOOL_NAME = "search_tools"
 OWUI_CALL_TOOL_NAME = "call_tool"
 OWUI_TOOL_MANIFEST_RE = re.compile(r"\n?<available_tools>\n.*?</available_tools>", re.DOTALL)
+
+OWUI_NATIVE_REPLACEMENTS = {
+    "search_web": "web_search",
+    "fetch_url": "web_fetch",
+    "execute_code": "code_execution",
+}
+
+def owui_builtin_allowed(metadata: Optional[dict], category: str) -> bool:
+    meta = (((metadata or {}).get("model") or {}).get("info") or {}).get("meta") or {}
+    return (meta.get("builtinTools") or {}).get(category, True) is not False and (
+        meta.get("capabilities") or {}
+    ).get(category, True) is not False
+
+def drop_replaced_owui_tools(tools: List[dict]) -> List[dict]:
+    names = {t.get("name") for t in tools}
+    dropped = {o for o, n in OWUI_NATIVE_REPLACEMENTS.items() if o in names and n in names}
+    if not dropped:
+        return tools
+    logging.getLogger(__name__).info(f"Dropped {sorted(dropped)}: replaced by Anthropic tools")
+    kept = [t for t in tools if t.get("name") not in dropped]
+    if not any(t.get("defer_loading") for t in kept):
+        kept = [t for t in kept if not str(t.get("type", "")).startswith("tool_search_tool_")]
+    return kept
+
+def unavailable_tool_message(name: str, offered: set) -> str:
+    native = OWUI_NATIVE_REPLACEMENTS.get(name)
+    if native and native in offered:
+        return f"Tool '{name}' does not exist in this chat. Use the '{native}' tool instead."
+    if name == OWUI_CALL_TOOL_NAME:
+        return "Tool 'call_tool' does not exist in this chat. Call tools directly by their name."
+    return f"Tool '{name}' is not available. It may require server context or is not configured."
 
 def normalize_tool_name_list(value: Any) -> set[str]:
     if value is None:
@@ -373,6 +402,11 @@ try:
 except ImportError:
     get_builtin_tools = None
     BUILTIN_TOOLS_AVAILABLE = False
+
+try:
+    from open_webui.config import CODE_INTERPRETER_PYODIDE_PROMPT
+except ImportError:
+    CODE_INTERPRETER_PYODIDE_PROMPT = ""
 
 try:
     from open_webui.utils.middleware import process_tool_result
@@ -562,6 +596,7 @@ class PipeRequestContext:
     tools: Optional[Dict[str, Any]] = None
     builtin_tools: Dict[str, Any] = field(default_factory=dict)
     api_tool_names: List[str] = field(default_factory=list)
+    offered_tool_names: set = field(default_factory=set)
     api_key: str = ""
 
     persisted_at: float = 0.0
@@ -912,9 +947,10 @@ async def create_request_payload(
         __tools__, body, actual_model_name, __user__, __metadata__
     )
 
-    activate_code_execution = __metadata__.get(
-        "activate_code_execution_tool", False
-    )
+    activate_code_execution = bool(
+        __metadata__.get("activate_code_execution_tool", False)
+        or (pipe.valves.CODE_EXECUTION and (__metadata__.get("features") or {}).get("code_interpreter"))
+    ) and owui_builtin_allowed(__metadata__, "code_interpreter")
 
     if has_files_api_uploads:
         activate_code_execution = True
@@ -955,6 +991,8 @@ async def create_request_payload(
             code_exec_type = "code_execution_20250825"
             tools_list.insert(0, {"type": code_exec_type, "name": "code_execution"})
             has_code_execution = True
+
+    tools_list = drop_replaced_owui_tools(tools_list)
 
     if requested_skills and not has_code_execution:
         await status.activity("Skills require Anthropic code_execution")
@@ -1713,7 +1751,18 @@ def _filter_tool_args(tool_entry: Any, args: dict) -> dict:
         )
     return kept
 
-def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, str | None]:
+def _call_tool_error(message: str, offered: set | None) -> str:
+    if offered and OWUI_CALL_TOOL_NAME not in offered:
+        return f"{message} {unavailable_tool_message(OWUI_CALL_TOOL_NAME, offered)}"
+    return message
+
+def _is_replaced(name: str, offered: set | None) -> bool:
+    native = OWUI_NATIVE_REPLACEMENTS.get(name)
+    return bool(offered and native in offered and name not in offered)
+
+def _resolve_owui_call_tool(
+    tool_input: Any, tools: dict, offered: set | None = None
+) -> tuple[str, dict, str | None]:
     try:
         if not isinstance(tool_input, dict) or set(tool_input) != {"tool_name", "params"}:
             raise ValueError("call_tool requires tool_name and params.")
@@ -1722,6 +1771,8 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
             raise ValueError("tool_name must be a non-empty string.")
         if name in {OWUI_SEARCH_TOOL_NAME, OWUI_CALL_TOOL_NAME}:
             raise ValueError("call_tool cannot invoke search_tools or itself.")
+        if _is_replaced(name, offered):
+            raise ValueError(unavailable_tool_message(name, offered))
         if name not in tools:
             raise ValueError(f'Tool "{name}" is not available. Search for an available tool.')
         params = tool_input["params"]
@@ -1730,7 +1781,7 @@ def _resolve_owui_call_tool(tool_input: Any, tools: dict) -> tuple[str, dict, st
         if not isinstance(params, dict):
             raise ValueError("params must decode to a JSON object.")
     except (TypeError, ValueError) as error:
-        return OWUI_CALL_TOOL_NAME, {}, f"Error: {error}"
+        return OWUI_CALL_TOOL_NAME, {}, _call_tool_error(f"Error: {error}", offered)
     return name, params, None
 
 def _owui_call_tool_batch(tool_input: Any) -> list | None:
@@ -1747,14 +1798,14 @@ class OwuiToolBatch(list):
             ensure_ascii=False,
         )
 
-async def _run_owui_call_tool_batch(entries: list, tools: dict) -> Any:
+async def _run_owui_call_tool_batch(entries: list, tools: dict, offered: set | None = None) -> Any:
     if not entries:
-        return "Error: call_tool requires a non-empty calls array."
+        return _call_tool_error("Error: call_tool requires a non-empty calls array.", offered)
     if any(not isinstance(e, dict) or set(e) != {"tool_name", "params"} for e in entries):
-        return "Error: Each call requires tool_name and params."
+        return _call_tool_error("Error: Each call requires tool_name and params.", offered)
     batch = OwuiToolBatch()
     for entry in entries:
-        name, params, error = _resolve_owui_call_tool(entry, tools)
+        name, params, error = _resolve_owui_call_tool(entry, tools, offered)
         tool = tools.get(name) or {}
         params, labels, _approval = split_owui_call_metadata(params)
         result = {"tool_name": name if not error else entry["tool_name"],
@@ -1849,6 +1900,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
     tools = ctx.tools
     builtin_tools = ctx.builtin_tools
     api_tool_names = ctx.api_tool_names
+    offered = getattr(ctx, "offered_tool_names", None) or set()
     running_tool_tasks = tool_use.running_tasks
     emit_delta = ctx.emit_delta
     emit_event = ctx.event_emitter
@@ -1884,12 +1936,12 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
                 tool_input, call_tool_batch = call_tool_batch[0], None
             if call_tool_batch and getattr(ctx, "items", None) is not None:
 
-                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools)
+                first, first_params, first_error = _resolve_owui_call_tool(call_tool_batch[0], tools, offered)
                 if not first_error:
                     first_params, _labels, _approval = split_owui_call_metadata(first_params)
                     ctx.items.dispatched(tool_call_data.get("id"), first, first_params)
             if call_tool_batch is None:
-                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools)
+                tool_name, tool_input, call_tool_error = _resolve_owui_call_tool(tool_input, tools, offered)
                 if not call_tool_error and getattr(ctx, "items", None) is not None:
                     ctx.items.dispatched(tool_call_data.get("id"), tool_name, tool_input)
 
@@ -1907,11 +1959,15 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
         if call_tool_batch is not None:
             task = asyncio.create_task(
                 pipe._await_tool_task_result(
-                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools)
+                    tool_call_data, _run_owui_call_tool_batch(call_tool_batch, tools, offered)
                 )
             )
             running_tool_tasks.append(task)
-        elif call_tool_error:
+        elif call_tool_error or _is_replaced(tool_name, offered):
+
+            if not call_tool_error:
+                logger.info("Tool '%s' replaced by '%s': returning a pointer", tool_name, OWUI_NATIVE_REPLACEMENTS[tool_name])
+                call_tool_error = json.dumps({"error": unavailable_tool_message(tool_name, offered)}, ensure_ascii=False)
 
             async def call_tool_error_result(message=call_tool_error):
                 return message
@@ -2011,12 +2067,7 @@ async def handle_tool_use_block_stop(ctx: Any) -> None:
             logger.warning("Tool '%s' not found in __tools__ or builtin_tools", tool_name)
 
             async def error_result(tn=tool_name):
-                return json.dumps(
-                    {
-                        "error": f"Tool '{tn}' is not available. It may require server context or is not configured."
-                    },
-                    ensure_ascii=False,
-                )
+                return json.dumps({"error": unavailable_tool_message(tn, offered)}, ensure_ascii=False)
 
             task = asyncio.create_task(
                 pipe._await_tool_task_result(tool_call_data, error_result())
@@ -3905,7 +3956,18 @@ class Pipe:
         )
         WEB_SEARCH: bool = Field(
             default=True,
-            description="Enable web search tool for Claude models. Use Anthropic Web Search Toggle Function for fine grained control",
+            description=(
+                "Anthropic web search replaces OpenWebUI's search_web / fetch_url. "
+                "A model whose Web Search builtin tool is switched off cannot search, even with this on. "
+                "The Web Search button forces a search for that message."
+            ),
+        )
+        CODE_EXECUTION: bool = Field(
+            default=True,
+            description=(
+                "The Code Interpreter button turns on Anthropic code execution instead of OpenWebUI's execute_code. "
+                "A model whose Code Interpreter builtin tool is switched off gets neither."
+            ),
         )
         WEB_FETCH: bool = Field(
             default=True,
@@ -5789,6 +5851,11 @@ class Pipe:
         web_search_enabled = self.valves.WEB_SEARCH or __metadata__.get(
             "web_search_enforced", False
         )
+
+        web_allowed = owui_builtin_allowed(__metadata__, "web_search")
+        if web_search_enabled and not web_allowed:
+            logger.info("Web search skipped: the model's Web Search builtin tool is switched off")
+            web_search_enabled = False
         if web_search_enabled and not self.get_model_info(actual_model_name).get(
             "supports_web_search_tool", True
         ):
@@ -5844,7 +5911,7 @@ class Pipe:
             logger.debug(f"Added web_search tool: {web_search_type}")
 
         model_info = self.get_model_info(actual_model_name)
-        if self.valves.WEB_FETCH:
+        if self.valves.WEB_FETCH and web_allowed:
             use_dynamic_fetch = __user__["valves"].ENABLE_DYNAMIC_FILTERING
             if use_dynamic_fetch and model_info.get("supports_dynamic_filtering", False):
                 web_fetch_type = "web_fetch_20260209"
@@ -8701,6 +8768,24 @@ class Pipe:
                     if msg.get("role") == "system" and isinstance(msg.get("content"), str):
                         msg["content"] = OWUI_TOOL_MANIFEST_RE.sub("", msg["content"])
 
+            features = (__metadata__ or {}).get("features") or {}
+            if features.get("web_search") and self.valves.WEB_SEARCH and __metadata__ is not None:
+                __metadata__["web_search_enforced"] = True
+            if (
+                features.get("code_interpreter")
+                and self.valves.CODE_EXECUTION
+                and CODE_INTERPRETER_PYODIDE_PROMPT
+                and owui_builtin_allowed(__metadata__, "code_interpreter")
+            ):
+                for msg in body.get("messages", []):
+                    if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+
+                        msg["content"] = (
+                            msg["content"]
+                            .replace("\n" + CODE_INTERPRETER_PYODIDE_PROMPT, "")
+                            .replace(CODE_INTERPRETER_PYODIDE_PROMPT, "")
+                        )
+
             payload, headers, new_marker_metadata, api_tool_names = await self._create_payload(
                 body, __metadata__, __user__, __tools__, __event_emitter__, __files__
             )
@@ -8715,6 +8800,7 @@ class Pipe:
             request_ctx.api_key = api_key
             request_ctx.builtin_tools = builtin_tools
             request_ctx.api_tool_names = api_tool_names
+            request_ctx.offered_tool_names = {t.get("name") for t in payload.get("tools") or []}
             client = self._build_anthropic_client(api_key, default_headers=headers, timeout=request_timeout)
             payload_for_stream = {k: v for k, v in payload.items() if k != "stream"}
             include_usage = (
