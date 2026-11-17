@@ -609,6 +609,22 @@ class PipeRequestMessagesMethods:
 
         return blocks if blocks else result_str
 
+    def _tool_result_file_images(self, files, user=None) -> list:
+        """Image blocks for the data-URI images among process_tool_result's files.
+
+        OpenWebUI moves data-URI images out of a tool result into its files and
+        leaves a placeholder in the text ("[image]" on 0.12+, "... Image file
+        read successfully." for a bare data URI), so the model never saw them.
+        The files still go to the chat as before.
+        """
+        blocks = []
+        for file in files or []:
+            url = file.get("url") if isinstance(file, dict) and file.get("type") == "image" else None
+            match = PATTERN_TOOL_RESULT_DATA_IMAGE.fullmatch(url) if isinstance(url, str) else None
+            if match:
+                blocks.append(self._build_tool_result_image_block(match.group("mime"), match.group("data"), user))
+        return blocks
+
     def _truncate_tool_result_text(self, text: str, user=None) -> str:
         """
         Backstop against a runaway non-image tool result blowing the context

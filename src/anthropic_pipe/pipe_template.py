@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.2
+version: 0.11.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,10 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.3
+- Images a local tool returns as base64 data URIs reach the model. OpenWebUI moves them out of the tool result before the pipe sees it ("[image]" on 0.12 and 0.13, "Image file read successfully." on older versions), so Claude got the placeholder only. They now go into the tool result as image blocks; the chat shows them as before. A tool called from code execution (programmatic tool calling) keeps the text, the API takes no images there (#61, reported by @SPI-git-devel).
+- LEGACY_CHAT_MIGRATION includes chats made through workspace models (Workspace > Models) whose base model is one of the pipe's models. OpenWebUI stores the workspace model's id on those messages, so the migration found 0 chats there. If a dry run already wrote `anthropic_pipe_legacy_migration_<id>.dryrun.json` to OpenWebUI's data directory, delete it to run it again (#60, reported by @MarshalX).
+
 v0.11.2
 - WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.
 - The Web Search and Code Interpreter buttons work without the Companion Filter: the pipe reads them itself. The filter is only needed with function calling set to "legacy".
@@ -58,14 +62,6 @@ v0.11.1
 - Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
 - Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
 - Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
-
-v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
-- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
-- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
-- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
-- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
-- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
-- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
 
 """
 

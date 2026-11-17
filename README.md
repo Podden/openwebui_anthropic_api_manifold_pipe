@@ -279,6 +279,11 @@ The API key valve — admin-wide and the per-user override — is encrypted befo
 ---
 
 ## 📝 Recent pipe changes
+### `v0.11.3`
+_Tested on OpenWebUI 0.13.3._
+- Images a local tool returns as base64 data URIs reach the model. OpenWebUI moves them out of the tool result before the pipe sees it ("[image]" on 0.12 and 0.13, "Image file read successfully." on older versions), so Claude got the placeholder only. They now go into the tool result as image blocks; the chat shows them as before. A tool called from code execution (programmatic tool calling) keeps the text, the API takes no images there (#61, reported by @SPI-git-devel).
+- LEGACY_CHAT_MIGRATION includes chats made through workspace models (Workspace > Models) whose base model is one of the pipe's models. OpenWebUI stores the workspace model's id on those messages, so the migration found 0 chats there. If a dry run already wrote `anthropic_pipe_legacy_migration_<id>.dryrun.json` to OpenWebUI's data directory, delete it to run it again (#60, reported by @MarshalX).
+
 ### `v0.11.2`
 _Tested on OpenWebUI 0.13.3._
 - WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.

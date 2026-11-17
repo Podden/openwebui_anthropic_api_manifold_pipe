@@ -406,10 +406,23 @@ class PipeLegacyMethods:
 
         stats: dict = {"chats": 0, "skip": 0, "converted": 0, "reflowed": 0, "mismatch": 0, "written": 0, "failed": 0, "mismatches": []}
         chat_ids: set = set()
+        # Messages sent through a workspace model carry its id, not the pipe model's.
+        # Without them the migration still covers the pipe's own model ids, as before.
+        workspace: set = set()
+        try:
+            from open_webui.models.models import Models
+
+            workspace = {m.id for m in await Models.get_all_models() if str(m.base_model_id or "").startswith(prefix + ".")}
+        except Exception as e:
+            logger.warning(f"Legacy migration: workspace models not listed, pipe models only: {e}")
+
+        def ours(model_id) -> bool:
+            return str(model_id).startswith(prefix + ".") or str(model_id) in workspace
+
         # OpenWebUI 0.12.4 renamed get_unique_counts_by_model; both return {model_id: count}.
         count_by_model = getattr(ChatMessages, "get_unique_counts_by_model", None) or ChatMessages.get_message_count_by_model
         for model_id in await count_by_model():
-            if not str(model_id).startswith(prefix + "."):
+            if not ours(model_id):
                 continue
             skip = 0
             while page := await ChatMessages.get_chat_ids_by_model_id(model_id, skip=skip, limit=200):
@@ -423,7 +436,7 @@ class PipeLegacyMethods:
                 stored = (((chat.chat if chat else None) or {}).get("history") or {}).get("messages") or {}
                 changed = {}
                 for mid, message in messages.items():
-                    if not str(message.get("model", "")).startswith(prefix + "."):
+                    if not ours(message.get("model", "")):
                         continue
                     outcome, items = self._migrate_legacy_message(message, convert)
                     stats[outcome] += 1

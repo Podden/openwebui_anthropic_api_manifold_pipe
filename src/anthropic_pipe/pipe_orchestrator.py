@@ -700,6 +700,7 @@ class PipeOrchestratorMethods:
                                                 # for Rich UI (HTMLResponse, embeds, files)
                                                 tool_result_embeds = []
                                                 tool_result_files = []
+                                                tool_result_images = []
                                                 # Batched call_tool (OpenWebUI 0.13.1+): every entry
                                                 # through process_tool_result, so each keeps its embeds.
                                                 batch_shown = None
@@ -715,6 +716,7 @@ class PipeOrchestratorMethods:
                                                                 )
                                                             except Exception as e:
                                                                 logger.warning(f"process_tool_result failed for '{entry['tool_name']}': {e}")
+                                                        tool_result_images.extend(self._tool_result_file_images(files, __user__))
                                                         if not isinstance(text, str):
                                                             try:
                                                                 text = json.dumps(text, ensure_ascii=False)
@@ -743,6 +745,7 @@ class PipeOrchestratorMethods:
                                                         )
                                                     except Exception as e:
                                                         logger.warning(f"process_tool_result failed for '{tool_name}': {e}")
+                                                    tool_result_images = self._tool_result_file_images(tool_result_files, __user__)
 
                                                 # Emit files event if tool produced files
                                                 if tool_result_files and __event_emitter__:
@@ -783,10 +786,16 @@ class PipeOrchestratorMethods:
                                                 # read_file tool returning a PNG) into a real Anthropic
                                                 # image block instead of raw base64 TEXT, and apply the
                                                 # TOOL_RESULT_MAX_TOKENS backstop to non-image output.
+                                                result_content = self._convert_tool_result_content(result_str, __user__)
+                                                # A call from code execution takes text only (the API returns 400).
+                                                if tool_result_images and tool_use_id not in tool_use_state.programmatic_ids:
+                                                    if isinstance(result_content, str):
+                                                        result_content = [{"type": "text", "text": result_content}] if result_content else []
+                                                    result_content = [*result_content, *tool_result_images]
                                                 result_block = {
                                                     "type": "tool_result",
                                                     "tool_use_id": tool_use_id,
-                                                    "content": self._convert_tool_result_content(result_str, __user__),
+                                                    "content": result_content,
                                                 }
                                                 if is_error:
                                                     result_block["is_error"] = True

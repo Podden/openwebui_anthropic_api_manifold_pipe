@@ -4,7 +4,7 @@ id: anthropic_new
 author: Podden (https://github.com/Podden/)
 github: https://github.com/Podden/openwebui_anthropic_api_manifold_pipe
 original_author: Balaxxe (Updated by nbellochi)
-version: 0.11.2
+version: 0.11.3
 license: MIT
 requirements: pydantic>=2.0.0, anthropic~=2.7, pillow-heif>=0.18.0
 environment_variables:
@@ -38,6 +38,10 @@ Supports:
 - Server-side fallback on safety refusals
 
 Changelog (older versions: CHANGELOG.md in the repository):
+v0.11.3
+- Images a local tool returns as base64 data URIs reach the model. OpenWebUI moves them out of the tool result before the pipe sees it ("[image]" on 0.12 and 0.13, "Image file read successfully." on older versions), so Claude got the placeholder only. They now go into the tool result as image blocks; the chat shows them as before. A tool called from code execution (programmatic tool calling) keeps the text, the API takes no images there (#61, reported by @SPI-git-devel).
+- LEGACY_CHAT_MIGRATION includes chats made through workspace models (Workspace > Models) whose base model is one of the pipe's models. OpenWebUI stores the workspace model's id on those messages, so the migration found 0 chats there. If a dry run already wrote `anthropic_pipe_legacy_migration_<id>.dryrun.json` to OpenWebUI's data directory, delete it to run it again (#60, reported by @MarshalX).
+
 v0.11.2
 - WEB_SEARCH now means: Anthropic web search replaces OpenWebUI's search_web / fetch_url. While web_search / web_fetch go out, OpenWebUI's two tools are dropped from the request. New valve CODE_EXECUTION (on by default) does the same for the Code Interpreter button: it turns on Anthropic code execution instead of OpenWebUI's execute_code, and the pyodide note OpenWebUI appends to the system prompt for its tool is removed.
 - The Web Search and Code Interpreter buttons work without the Companion Filter: the pipe reads them itself. The filter is only needed with function calling set to "legacy".
@@ -58,14 +62,6 @@ v0.11.1
 - Without the token display (SHOW_TOKEN_COUNT `Off`) a turn ends without the "✅ Response Complete" line, like OpenWebUI's own connections. OpenWebUI's own finished statuses (e.g. retrieved sources), notices and a web search's source list stay visible.
 - Number valves show as sliders on OpenWebUI 0.12.5+ (thinking budget, max uses, retries).
 - Cache diagnostics goes out without its beta header (generally available). Requirement raised to `anthropic~=2.7`; OpenWebUI installs it when it loads the pipe.
-
-v0.11.0 (streaming as output items needs OpenWebUI 0.12.2; older versions keep the text path)
-- Answers stream as OpenWebUI output items, the way OpenWebUI's own OpenAI and Ollama connections do: thinking as reasoning, text as a message, every tool call (local tools, web search, web fetch, code execution, tool search, advisor) as a function call with its result. OpenWebUI renders them natively, writes the chat once at the end and serves reloads and reconnects from its own copy. The exact Anthropic blocks (thinking signatures, encrypted search results) ride in `reasoning_details` and `provider_function`, so the next turn sends the API byte for byte what it saw and the prompt cache holds across thinking, tools and server tools.
-- The tool loop builds its next request from the same items the next turn replays, so the two cannot drift apart (the cause of #58 and of the `caller` cache break fixed in 0.10.3).
-- Every tool call has an output before the stream ends, an error if the run failed, so OpenWebUI never runs one of the pipe's calls itself. When the user stops an answer, OpenWebUI marks open calls incomplete and the next turn leaves them out.
-- Chats written before 0.11 convert once to output items: valve LEGACY_CHAT_MIGRATION, default `dry-run` (counts and writes a report to OpenWebUI's data directory), `on` converts. A turn is converted only if the API gets the same messages afterwards; turns that still carried the cache-diagnostics block or two adjacent text blocks miss the prompt cache once. The `<details>` parser moved to its own module and goes away in a later release.
-- In item mode the 5-second `replace` throttle and the 2-second resync from 0.10.3 are gone: OpenWebUI stores and resyncs items itself.
-- A response that is retried (stream cut off, overloaded API) replaces what the failed attempt had shown instead of being appended to it.
 
 """
 
@@ -748,6 +744,9 @@ class ToolUseState:
     running_tasks: list[Any] = field(default_factory=list)
     progress_blocks: dict[str, str] = field(default_factory=dict)
     api_passthrough: bool = False
+    # tool_use ids called from code execution (programmatic tool calling):
+    # their tool_result may carry text only.
+    programmatic_ids: set[str] = field(default_factory=set)
     # Tool calls the caller has to execute itself: tools that arrived in
     # body.tools with no callable attached. Kept in OpenAI shape so a
     # non-streaming response can hand them back as `tool_calls` instead of
@@ -761,6 +760,7 @@ class ToolUseState:
         self.running_tasks = []
         self.progress_blocks = {}
         self.api_passthrough = False
+        self.programmatic_ids = set()
         # `passthrough_calls` deliberately survives: it is the turn's result,
         # not per-iteration bookkeeping, and is read after the loop ends.
 
@@ -2350,6 +2350,11 @@ async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
     if server_tool.in_code_execution and server_tool.is_web_filtering:
         server_tool.is_web_filtering = False
         server_tool.has_user_tools = True
+
+    caller = getattr(content_block, "caller", None)
+    caller_type = caller.get("type") if isinstance(caller, dict) else getattr(caller, "type", None)
+    if caller_type and caller_type != "direct":
+        tool_use.programmatic_ids.add(getattr(content_block, "id", ""))
 
     initial_input = getattr(content_block, "input", None) or {}
     tool_use.tool_name_at_start = tool_name
@@ -6315,6 +6320,22 @@ class Pipe:
 
         return blocks if blocks else result_str
 
+    def _tool_result_file_images(self, files, user=None) -> list:
+        """Image blocks for the data-URI images among process_tool_result's files.
+
+        OpenWebUI moves data-URI images out of a tool result into its files and
+        leaves a placeholder in the text ("[image]" on 0.12+, "... Image file
+        read successfully." for a bare data URI), so the model never saw them.
+        The files still go to the chat as before.
+        """
+        blocks = []
+        for file in files or []:
+            url = file.get("url") if isinstance(file, dict) and file.get("type") == "image" else None
+            match = PATTERN_TOOL_RESULT_DATA_IMAGE.fullmatch(url) if isinstance(url, str) else None
+            if match:
+                blocks.append(self._build_tool_result_image_block(match.group("mime"), match.group("data"), user))
+        return blocks
+
     def _truncate_tool_result_text(self, text: str, user=None) -> str:
         """
         Backstop against a runaway non-image tool result blowing the context
@@ -6814,10 +6835,23 @@ class Pipe:
 
         stats: dict = {"chats": 0, "skip": 0, "converted": 0, "reflowed": 0, "mismatch": 0, "written": 0, "failed": 0, "mismatches": []}
         chat_ids: set = set()
+        # Messages sent through a workspace model carry its id, not the pipe model's.
+        # Without them the migration still covers the pipe's own model ids, as before.
+        workspace: set = set()
+        try:
+            from open_webui.models.models import Models
+
+            workspace = {m.id for m in await Models.get_all_models() if str(m.base_model_id or "").startswith(prefix + ".")}
+        except Exception as e:
+            logger.warning(f"Legacy migration: workspace models not listed, pipe models only: {e}")
+
+        def ours(model_id) -> bool:
+            return str(model_id).startswith(prefix + ".") or str(model_id) in workspace
+
         # OpenWebUI 0.12.4 renamed get_unique_counts_by_model; both return {model_id: count}.
         count_by_model = getattr(ChatMessages, "get_unique_counts_by_model", None) or ChatMessages.get_message_count_by_model
         for model_id in await count_by_model():
-            if not str(model_id).startswith(prefix + "."):
+            if not ours(model_id):
                 continue
             skip = 0
             while page := await ChatMessages.get_chat_ids_by_model_id(model_id, skip=skip, limit=200):
@@ -6831,7 +6865,7 @@ class Pipe:
                 stored = (((chat.chat if chat else None) or {}).get("history") or {}).get("messages") or {}
                 changed = {}
                 for mid, message in messages.items():
-                    if not str(message.get("model", "")).startswith(prefix + "."):
+                    if not ours(message.get("model", "")):
                         continue
                     outcome, items = self._migrate_legacy_message(message, convert)
                     stats[outcome] += 1
@@ -11169,6 +11203,7 @@ class Pipe:
                                                 # for Rich UI (HTMLResponse, embeds, files)
                                                 tool_result_embeds = []
                                                 tool_result_files = []
+                                                tool_result_images = []
                                                 # Batched call_tool (OpenWebUI 0.13.1+): every entry
                                                 # through process_tool_result, so each keeps its embeds.
                                                 batch_shown = None
@@ -11184,6 +11219,7 @@ class Pipe:
                                                                 )
                                                             except Exception as e:
                                                                 logger.warning(f"process_tool_result failed for '{entry['tool_name']}': {e}")
+                                                        tool_result_images.extend(self._tool_result_file_images(files, __user__))
                                                         if not isinstance(text, str):
                                                             try:
                                                                 text = json.dumps(text, ensure_ascii=False)
@@ -11212,6 +11248,7 @@ class Pipe:
                                                         )
                                                     except Exception as e:
                                                         logger.warning(f"process_tool_result failed for '{tool_name}': {e}")
+                                                    tool_result_images = self._tool_result_file_images(tool_result_files, __user__)
 
                                                 # Emit files event if tool produced files
                                                 if tool_result_files and __event_emitter__:
@@ -11252,10 +11289,16 @@ class Pipe:
                                                 # read_file tool returning a PNG) into a real Anthropic
                                                 # image block instead of raw base64 TEXT, and apply the
                                                 # TOOL_RESULT_MAX_TOKENS backstop to non-image output.
+                                                result_content = self._convert_tool_result_content(result_str, __user__)
+                                                # A call from code execution takes text only (the API returns 400).
+                                                if tool_result_images and tool_use_id not in tool_use_state.programmatic_ids:
+                                                    if isinstance(result_content, str):
+                                                        result_content = [{"type": "text", "text": result_content}] if result_content else []
+                                                    result_content = [*result_content, *tool_result_images]
                                                 result_block = {
                                                     "type": "tool_result",
                                                     "tool_use_id": tool_use_id,
-                                                    "content": self._convert_tool_result_content(result_str, __user__),
+                                                    "content": result_content,
                                                 }
                                                 if is_error:
                                                     result_block["is_error"] = True

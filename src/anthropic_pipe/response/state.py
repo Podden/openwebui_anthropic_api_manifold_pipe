@@ -66,6 +66,9 @@ class ToolUseState:
     running_tasks: list[Any] = field(default_factory=list)
     progress_blocks: dict[str, str] = field(default_factory=dict)
     api_passthrough: bool = False
+    # tool_use ids called from code execution (programmatic tool calling):
+    # their tool_result may carry text only.
+    programmatic_ids: set[str] = field(default_factory=set)
     # Tool calls the caller has to execute itself: tools that arrived in
     # body.tools with no callable attached. Kept in OpenAI shape so a
     # non-streaming response can hand them back as `tool_calls` instead of
@@ -80,6 +83,7 @@ class ToolUseState:
         self.running_tasks = []
         self.progress_blocks = {}
         self.api_passthrough = False
+        self.programmatic_ids = set()
         # `passthrough_calls` deliberately survives: it is the turn's result,
         # not per-iteration bookkeeping, and is read after the loop ends.
 

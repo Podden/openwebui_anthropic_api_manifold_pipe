@@ -169,6 +169,11 @@ async def handle_tool_use_block_start(content_block: Any, ctx: Any) -> None:
         server_tool.is_web_filtering = False
         server_tool.has_user_tools = True
 
+    caller = getattr(content_block, "caller", None)
+    caller_type = caller.get("type") if isinstance(caller, dict) else getattr(caller, "type", None)
+    if caller_type and caller_type != "direct":
+        tool_use.programmatic_ids.add(getattr(content_block, "id", ""))
+
     initial_input = getattr(content_block, "input", None) or {}
     tool_use.tool_name_at_start = tool_name
     tool_use.tool_id_at_start = getattr(content_block, "id", "")
